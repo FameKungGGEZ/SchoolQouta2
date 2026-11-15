@@ -4,3 +4,7 @@
 node_modules/
 .vercel/
 supabase/.temp/
+test-data/demo-student-logins.csv
+test-data/demo-documents/
+work/
+all-web-pages-html.zip
