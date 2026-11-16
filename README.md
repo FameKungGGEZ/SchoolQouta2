@@ -5,12 +5,12 @@
 ## ตั้งค่า Supabase
 
 1. ใช้ Supabase project ของโรงเรียน หรือสร้าง project ใหม่แล้วแก้ `SUPABASE_URL` และ `SUPABASE_PUBLISHABLE_KEY` ที่ต้น `supabase-client.js` ค่า publishable key ใช้ในหน้าเว็บได้ แต่ห้ามนำ Secret/service-role key มาใส่ในไฟล์หน้าเว็บ
-2. รัน migration ทั้งชุดใน `supabase/migrations/` ด้วย `npx supabase link --project-ref <PROJECT_REF>` และ `npx supabase db push`
-3. สร้าง Auth user สำหรับผู้ดูแล แล้วรัน `supabase/bootstrap/create_admin_profile.sql` ใน SQL Editor เพื่อกำหนด role เป็น Admin แยกต่างหาก
+2. สร้าง schema ด้วย migration timestamped โดยรัน `npx supabase link --project-ref <PROJECT_REF>` และ `npx supabase db push` หรือเปิด [Final Migration](supabase/bootstrap/FINAL_MIGRATION.sql) ใน SQL Editor ของ project ใหม่ที่ยังว่าง (เลือกเพียงวิธีเดียว)
+3. สร้าง Auth user สำหรับผู้ดูแล แล้วรัน [Admin Migration](supabase/bootstrap/ADMIN_MIGRATION.sql) ใน SQL Editor เพื่อกำหนด role เป็น Admin แยกต่างหาก
 4. คู่มือการเตรียม Supabase สำหรับโรงเรียน/ลูกค้าใหม่ รวมการ deploy Edge Function นำเข้านักเรียน อยู่ที่ [supabase/NEW_PROJECT_SETUP.md](supabase/NEW_PROJECT_SETUP.md)
 5. เปิดเว็บผ่าน local/static server หรือ deploy ไป Vercel; อย่าเปิดด้วย `file://` เมื่อต้องทดสอบ Auth redirect/session
 
-นักเรียนเข้าสู่ระบบด้วยเลขประจำตัว 5 หลักและวันเกิดรูปแบบ `วว/ดด/ปปปป` โดยไม่ต้องมีอีเมลจริง เว็บแมปเลขประจำตัวเป็นอีเมลภายในรูปแบบ `student-{เลขประจำตัว}@login.schoolquota.invalid` สำหรับ Supabase Auth; ผู้ดูแลต้องสร้างบัญชี Auth ด้วย alias นี้และตั้งวันเกิดเป็นรหัสผ่าน จากนั้นเพิ่ม profile ตามข้อ 3 ครูและผู้ดูแลยังใช้อีเมลกับรหัสผ่านของ Supabase Auth บัญชีที่ไม่มี profile หรือ role ที่ตรงกับหน้าที่จะเข้าใช้ไม่ได้
+นักเรียนเข้าสู่ระบบด้วยเลขประจำตัว 5 หลักและวันเกิดรูปแบบ `วว/ดด/ปปปป` โดยไม่ต้องมีอีเมลจริง เว็บแมปเลขประจำตัวเป็นอีเมลภายในรูปแบบ `student-{เลขประจำตัว}@login.schoolquota.invalid` สำหรับ Supabase Auth; ใช้ระบบนำเข้ารายชื่อนักเรียนเพื่อสร้างบัญชีนักเรียน ครูและผู้ดูแลใช้บัญชี Supabase Auth ตามอีเมล/รหัสผ่าน โดยต้องมี `profiles` role ตรงกับหน้าที่ บัญชีที่ไม่มี profile หรือ role ที่ตรงกับหน้าที่จะเข้าใช้ไม่ได้
 
 นักเรียนแก้ไขใบสมัครได้ขณะเป็นฉบับร่างหรือถูกขอให้แก้ไข การส่งใบสมัครจะตรวจเอกสารในฐานข้อมูลและ Storage ซ้ำที่ฝั่ง server
 

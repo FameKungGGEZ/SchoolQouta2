@@ -18,6 +18,8 @@ npx supabase db push
 
 ตรวจ target project ที่ CLI แสดงก่อนยืนยันทุกครั้ง คำสั่งนี้ apply ไฟล์ใน `supabase/migrations/` ตามลำดับ และสร้างโครงสร้างฐานข้อมูล/Storage ของเว็บครบ ไม่ได้คัดลอกข้อมูลนักเรียนจาก project ทดสอบ
 
+หากต้องการรันเป็น SQL ก้อนเดียว ให้เปิด `supabase/bootstrap/FINAL_MIGRATION.sql` แล้วรันใน SQL Editor ของ **project ใหม่ที่ยังว่างเท่านั้น** ไฟล์นี้รวม migration timestamped ทั้งชุดไว้แล้ว เลือกใช้วิธีนี้หรือ `supabase db push` เพียงวิธีเดียวใน project เดียว
+
 ## 3. ติดตั้งระบบนำเข้านักเรียน
 
 ฟังก์ชันนี้ใช้ service-role key ฝั่ง server เพื่อสร้างบัญชี Auth จึงต้อง deploy Edge Function และเก็บ key เป็น Supabase secret เท่านั้น:
@@ -32,7 +34,7 @@ npx supabase secrets set SUPABASE_SERVICE_ROLE_KEY=<SERVICE_ROLE_KEY_ของ�
 ## 4. สร้างบัญชี Admin
 
 1. ใน Supabase project ใหม่ เปิด **Authentication → Users → Add user** สร้างบัญชีด้วยอีเมลและรหัสผ่านของผู้ดูแล
-2. เปิด `supabase/bootstrap/create_admin_profile.sql` แทน `REPLACE_WITH_ADMIN_EMAIL` และ `REPLACE_WITH_ADMIN_NAME` ด้วยข้อมูลผู้ดูแล โดยไม่ใส่รหัสผ่าน
+2. เปิด `supabase/bootstrap/ADMIN_MIGRATION.sql` แทน `REPLACE_WITH_ADMIN_EMAIL` และ `REPLACE_WITH_ADMIN_NAME` ด้วยข้อมูลผู้ดูแล โดยไม่ใส่รหัสผ่าน
 3. รันไฟล์นั้นใน **SQL Editor** ของ project ใหม่ เพื่อเชื่อม Auth user กับ `public.profiles` และกำหนด role เป็น `admin`
 
 ไฟล์ SQL แอดมินแยกจาก migration schema โดยตั้งใจ เพราะรหัสผ่าน/ผู้ใช้ Auth เป็นความลับเฉพาะของโรงเรียนและไม่ควรถูกเก็บหรือสร้างจาก Git migration ทั่วไป ไฟล์นี้จะปฏิเสธถ้า Auth user ยังไม่มี หรือบัญชีนั้นถูกใช้เป็นบัญชีนักเรียนแล้ว
