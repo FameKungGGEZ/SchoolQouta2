@@ -4,17 +4,11 @@
 
 ## ตั้งค่า Supabase
 
-1. ใช้ Supabase project ที่กำหนดไว้ใน `supabase-client.js` หรือแก้ `SUPABASE_URL` และ `SUPABASE_PUBLISHABLE_KEY` ให้ตรงกับโปรเจกต์ของโรงเรียน ค่า publishable key ใช้ในเว็บได้ แต่ห้ามนำ `service_role` key มาใส่ในไฟล์หน้าเว็บ
-2. ใช้ Supabase CLI รัน `supabase link --project-ref gvkwltjcbiweuzaalbuw` แล้ว `supabase db push` เพื่อใช้ migration ทั้งหมดใน `supabase/migrations/` ตามลำดับเวลา รวมถึงการปรับสถานะตรวจเอกสารและการจัดเก็บใบสมัคร PDF
-3. สร้างผู้ใช้ในหน้า Supabase Dashboard > Authentication > Users แล้วเพิ่มแถวใน `public.profiles` ผ่าน SQL Editor โดยใช้ user ID จาก Auth:
-
-   ```sql
-   insert into public.profiles (user_id, role, student_id, full_name, class_room, seat_number)
-   values ('AUTH_USER_UUID', 'admin', null, 'ชื่อผู้ดูแล', null, null);
-   ```
-
-   สำหรับนักเรียนให้ใช้ `role = 'student'` และระบุ `student_id` 5 หลักที่ไม่ซ้ำ รวมถึงชื่อและห้องเรียน ส่วนครูใช้ `role = 'teacher'` และ `student_id = null` บัญชีและข้อมูลจริงต้อง provision โดยผู้ดูแลที่เชื่อถือได้
-4. เปิดเว็บผ่าน local/static server หรือ deploy ไป Vercel; อย่าเปิดด้วย `file://` เมื่อต้องทดสอบ Auth redirect/session
+1. ใช้ Supabase project ของโรงเรียน หรือสร้าง project ใหม่แล้วแก้ `SUPABASE_URL` และ `SUPABASE_PUBLISHABLE_KEY` ที่ต้น `supabase-client.js` ค่า publishable key ใช้ในหน้าเว็บได้ แต่ห้ามนำ Secret/service-role key มาใส่ในไฟล์หน้าเว็บ
+2. รัน migration ทั้งชุดใน `supabase/migrations/` ด้วย `npx supabase link --project-ref <PROJECT_REF>` และ `npx supabase db push`
+3. สร้าง Auth user สำหรับผู้ดูแล แล้วรัน `supabase/bootstrap/create_admin_profile.sql` ใน SQL Editor เพื่อกำหนด role เป็น Admin แยกต่างหาก
+4. คู่มือการเตรียม Supabase สำหรับโรงเรียน/ลูกค้าใหม่ รวมการ deploy Edge Function นำเข้านักเรียน อยู่ที่ [supabase/NEW_PROJECT_SETUP.md](supabase/NEW_PROJECT_SETUP.md)
+5. เปิดเว็บผ่าน local/static server หรือ deploy ไป Vercel; อย่าเปิดด้วย `file://` เมื่อต้องทดสอบ Auth redirect/session
 
 นักเรียนเข้าสู่ระบบด้วยเลขประจำตัว 5 หลักและวันเกิดรูปแบบ `วว/ดด/ปปปป` โดยไม่ต้องมีอีเมลจริง เว็บแมปเลขประจำตัวเป็นอีเมลภายในรูปแบบ `student-{เลขประจำตัว}@login.schoolquota.invalid` สำหรับ Supabase Auth; ผู้ดูแลต้องสร้างบัญชี Auth ด้วย alias นี้และตั้งวันเกิดเป็นรหัสผ่าน จากนั้นเพิ่ม profile ตามข้อ 3 ครูและผู้ดูแลยังใช้อีเมลกับรหัสผ่านของ Supabase Auth บัญชีที่ไม่มี profile หรือ role ที่ตรงกับหน้าที่จะเข้าใช้ไม่ได้
 

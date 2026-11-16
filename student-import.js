@@ -106,27 +106,30 @@
     const sample = rows.slice(0, 5);
     preview.innerHTML = `<b>ตัวอย่างข้อมูล ${sample.length} จาก ${rows.length} รายการ</b><div class="import-table-wrap"><table class="import-table"><thead><tr><th>รหัส</th><th>ชื่อ - สกุล</th><th>ห้อง</th><th>สถานะข้อมูล</th></tr></thead><tbody>${sample.map((row, index) => `<tr><td>${safeText(row.student_id)}</td><td>${safeText(`${row.prefix} ${row.given_name} ${row.surname}`.trim())}</td><td>${safeText(row.class_room || '—')}</td><td>${safeText(rowIssues.find((issue) => issue.startsWith(`แถว ${index + 2}:`)) || 'พร้อมนำเข้า')}</td></tr>`).join('')}</tbody></table></div>`;
     preview.classList.remove('hidden');
-    $('importSubmitButton').disabled = rowIssues.length > 0;
     setMessage(rowIssues.length
       ? `พบข้อผิดพลาด ${rowIssues.length} แถว กรุณาแก้ไฟล์ก่อนนำเข้า`
       : `อ่านได้ ${rows.length} รายการ · วันเกิดจะใช้เป็นรหัสผ่านเข้าสู่ระบบ`);
   }
 
   window.downloadStudentImportTemplate = function () {
-    const csv = 'รหัสประจำตัว,คำนำหน้า,ชื่อ,สกุล,วันเกิด,ห้อง,เลขที่\n99999,ด.ช.,ตัวอย่าง,นักเรียน,01/01/2553,MEP,1';
-    const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }));
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'ตัวอย่างนำเข้าข้อมูลนักเรียน.csv';
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    if (!window.XLSX) {
+      setMessage('โหลดตัวสร้างไฟล์ Excel ไม่สำเร็จ กรุณารีเฟรชหน้าแล้วลองใหม่');
+      return;
+    }
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ['รหัสประจำตัว', 'คำนำหน้า', 'ชื่อ', 'สกุล', 'วันเกิด', 'ห้อง', 'เลขที่'],
+      ['99999', 'ด.ช.', 'ตัวอย่าง', 'นักเรียน', '01/01/2553', 'MEP', '1']
+    ]);
+    sheet['!cols'] = [{ wch: 16 }, { wch: 12 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 12 }, { wch: 10 }];
+    XLSX.utils.book_append_sheet(workbook, sheet, 'นักเรียน');
+    XLSX.writeFile(workbook, 'ตัวอย่างนำเข้าข้อมูลนักเรียน.xlsx');
   };
 
   window.handleStudentImportFile = function (input) {
     const file = input.files?.[0];
     if (!file) return;
     rows = [];
-    $('importSubmitButton').disabled = true;
     $('importPreview').classList.add('hidden');
     setMessage('กำลังอ่านไฟล์…');
     if (!window.XLSX) {
@@ -166,6 +169,7 @@
         })).filter((row) => row.student_id || row.given_name || row.surname);
         if (!rows.length) throw new Error('ไม่พบแถวข้อมูลนักเรียน');
         renderPreview();
+        if (!rowIssues.length) window.submitStudentImportFile();
       } catch (error) {
         rows = [];
         setMessage(error.message || 'อ่านไฟล์ไม่สำเร็จ');
@@ -181,10 +185,11 @@
       setMessage('นำเข้าได้ไม่เกิน 500 รายการต่อครั้ง');
       return;
     }
-    if (!window.confirm(`ยืนยันนำเข้าหรือปรับปรุงบัญชีนักเรียน ${rows.length} รายการ? วันเกิดจะถูกตั้งเป็นรหัสผ่านของแต่ละคน`)) return;
-    const button = $('importSubmitButton');
-    button.disabled = true;
-    button.textContent = 'กำลังนำเข้า…';
+    if (!window.confirm(`ตรวจสอบตัวอย่างข้อมูลแล้วหรือยัง?\nยืนยันนำเข้าหรือปรับปรุงบัญชีนักเรียน ${rows.length} รายการ? วันเกิดจะถูกตั้งเป็นรหัสผ่านของแต่ละคน`)) {
+      setMessage('ยกเลิกการนำเข้าแล้ว หากต้องการนำเข้าให้เลือกไฟล์อีกครั้ง');
+      $('excelFile').value = '';
+      return;
+    }
     setMessage('กำลังบันทึกบัญชีและข้อมูลนักเรียน…');
     try {
       const result = await window.importStudentRows(rows);
@@ -202,8 +207,6 @@
       setMessage((body.error || error.message || 'นำเข้าไม่สำเร็จ')
         + (failed.length ? ` · ${failed.map((item) => `แถว ${item.row_number}: ${item.issues?.join(', ') || item.message}`).join(' | ')}` : ''));
     } finally {
-      button.textContent = 'นำเข้านักเรียน';
-      button.disabled = !rows.length || rowIssues.length > 0;
     }
   };
 })();

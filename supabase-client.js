@@ -18,6 +18,9 @@
   let reviewDistribution = 'balanced';
   let currentReviewTab = 0;
   let reviewQueueIndex = 0;
+  const reviewPlanFilters = [];
+  let reviewClassroomAssignments = [];
+  let draftReviewClassroomAssignments = [];
   let activeReviewQueue = [];
   let reviewPreviewRequest = 0;
   let reviewPreviewStudent = null;
@@ -53,6 +56,8 @@
     conduct: 'ใบรับรองความประพฤติ'
   };
   const originalClosePdfViewer = window.closePdfViewer;
+  const originalShowSchedule = window.showSchedule;
+  let admissionSchedule = [];
 
   function reportError(message, error) {
     console.error(message, error);
@@ -89,6 +94,170 @@
   function isStaff() {
     return state.profile && (state.profile.role === 'admin' || state.profile.role === 'teacher');
   }
+
+  function formatScheduleDate(value) {
+    if (!value) return '';
+    const [year, month, day] = value.split('-').map(Number);
+    return new Intl.DateTimeFormat('th-TH', { day: 'numeric', month: 'long', year: 'numeric' })
+      .format(new Date(year, month - 1, day));
+  }
+
+  function scheduleDateStatus(item) {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    if (today < item.start_date) return 'เร็ว ๆ นี้';
+    if (today > item.end_date) return 'สิ้นสุดแล้ว';
+    return 'กำลังดำเนินการ';
+  }
+
+  function renderAdmissionSchedule() {
+    const list = $('admissionScheduleList');
+    if (!list) return;
+    list.replaceChildren();
+    if (!admissionSchedule.length) {
+      const empty = document.createElement('p');
+      empty.className = 'smallnote';
+      empty.textContent = 'ยังไม่มีประกาศกำหนดการ';
+      list.append(empty);
+      return;
+    }
+    admissionSchedule.forEach((item) => {
+      const row = document.createElement('article');
+      row.className = 'sched';
+      const dates = document.createElement('time');
+      dates.textContent = `${formatScheduleDate(item.start_date)} – ${formatScheduleDate(item.end_date)}`;
+      const details = document.createElement('div');
+      const title = document.createElement('b');
+      title.textContent = item.title;
+      const content = document.createElement('div');
+      content.className = 'smallnote';
+      content.textContent = item.content;
+      details.append(title, content);
+      const status = document.createElement('span');
+      status.className = 'pill';
+      status.textContent = scheduleDateStatus(item);
+      row.append(dates, details, status);
+      list.append(row);
+    });
+  }
+
+  function renderAdmissionScheduleEditor() {
+    const editor = $('admissionScheduleEditor');
+    if (!editor) return;
+    editor.replaceChildren();
+    if (!isStaff()) {
+      const note = document.createElement('p');
+      note.className = 'smallnote';
+      note.textContent = 'เข้าสู่ระบบครูหรือผู้ดูแลเพื่อจัดการกำหนดการ';
+      editor.append(note);
+      return;
+    }
+    if (!admissionSchedule.length) {
+      const empty = document.createElement('p');
+      empty.className = 'smallnote';
+      empty.textContent = 'ยังไม่มีประกาศ เพิ่มรายการใหม่ได้จากแบบฟอร์มด้านล่าง';
+      editor.append(empty);
+    }
+    admissionSchedule.forEach((item) => {
+      const row = document.createElement('article');
+      row.className = 'admission-schedule-item';
+      row.dataset.scheduleId = item.id;
+      row.innerHTML = '<div class="formgrid"><div class="field"><label class="label">หัวข้อ</label><input class="input" data-field="title" maxlength="160" required></div><div class="field"><label class="label">วันที่เริ่ม</label><input class="input" data-field="start_date" type="date" required></div><div class="field"><label class="label">วันที่สิ้นสุด</label><input class="input" data-field="end_date" type="date" required></div></div><div class="field"><label class="label">เนื้อหา</label><textarea class="input" data-field="content" rows="2" maxlength="1200" required></textarea></div><div class="toolbar"><button class="btn soft" type="button" data-action="save">บันทึกการแก้ไข</button><button class="btn ghost" type="button" data-action="delete">ลบประกาศ</button></div>';
+      row.querySelector('[data-field="title"]').value = item.title;
+      row.querySelector('[data-field="content"]').value = item.content;
+      row.querySelector('[data-field="start_date"]').value = item.start_date;
+      row.querySelector('[data-field="end_date"]').value = item.end_date;
+      editor.append(row);
+    });
+  }
+
+  async function loadAdmissionSchedule() {
+    try {
+      const { data, error } = await requireClient()
+        .from('admission_schedule_announcements')
+        .select('id, title, content, start_date, end_date, sort_order, created_at')
+        .order('sort_order', { ascending: true })
+        .order('start_date', { ascending: true })
+        .order('created_at', { ascending: true });
+      if (error) throw error;
+      admissionSchedule = data || [];
+      renderAdmissionSchedule();
+      renderAdmissionScheduleEditor();
+    } catch (error) {
+      renderAdmissionSchedule();
+      renderAdmissionScheduleEditor();
+      if (error?.code !== 'PGRST205') reportError('โหลดกำหนดการไม่สำเร็จ กรุณาตรวจสอบ migration ฐานข้อมูล', error);
+      else console.error('Admission schedule migration is not installed', error);
+    }
+  }
+
+  async function saveAdmissionScheduleRow(row) {
+    if (!isStaff()) throw new Error('บัญชีนี้ไม่มีสิทธิ์จัดการกำหนดการ');
+    const values = Object.fromEntries([...row.querySelectorAll('[data-field]')].map((input) => [input.dataset.field, input.value.trim()]));
+    if (!values.title || !values.content || !values.start_date || !values.end_date) throw new Error('กรุณากรอกหัวข้อ เนื้อหา และวันที่ให้ครบ');
+    if (values.end_date < values.start_date) throw new Error('วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่ม');
+    const { error } = await requireClient().from('admission_schedule_announcements').update(values).eq('id', row.dataset.scheduleId);
+    if (error) throw error;
+    await loadAdmissionSchedule();
+  }
+
+  async function addAdmissionSchedule(event) {
+    event.preventDefault();
+    if (!isStaff()) {
+      toast('บัญชีนี้ไม่มีสิทธิ์จัดการกำหนดการ');
+      return;
+    }
+    const values = {
+      title: $('scheduleTitle').value.trim(),
+      content: $('scheduleContent').value.trim(),
+      start_date: $('scheduleStart').value,
+      end_date: $('scheduleEnd').value,
+      sort_order: admissionSchedule.length
+    };
+    if (!values.title || !values.content || !values.start_date || !values.end_date) {
+      toast('กรุณากรอกหัวข้อ เนื้อหา และวันที่ให้ครบ');
+      return;
+    }
+    if (values.end_date < values.start_date) {
+      toast('วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่ม');
+      return;
+    }
+    try {
+      const { error } = await requireClient().from('admission_schedule_announcements').insert(values);
+      if (error) throw error;
+      $('admissionScheduleForm').reset();
+      await loadAdmissionSchedule();
+      toast('เพิ่มกำหนดการแล้ว');
+    } catch (error) {
+      reportError('เพิ่มกำหนดการไม่สำเร็จ', error);
+    }
+  }
+
+  window.showSchedule = function () {
+    if (typeof originalShowSchedule === 'function') originalShowSchedule();
+    loadAdmissionSchedule();
+  };
+
+  $('admissionScheduleForm')?.addEventListener('submit', addAdmissionSchedule);
+  $('admissionScheduleEditor')?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-action]');
+    const row = button?.closest('[data-schedule-id]');
+    if (!button || !row) return;
+    try {
+      if (button.dataset.action === 'save') {
+        await saveAdmissionScheduleRow(row);
+        toast('บันทึกกำหนดการแล้ว');
+      } else if (button.dataset.action === 'delete') {
+        if (!window.confirm('ลบประกาศกำหนดการนี้หรือไม่?')) return;
+        const { error } = await requireClient().from('admission_schedule_announcements').delete().eq('id', row.dataset.scheduleId);
+        if (error) throw error;
+        await loadAdmissionSchedule();
+        toast('ลบประกาศแล้ว');
+      }
+    } catch (error) {
+      reportError('จัดการกำหนดการไม่สำเร็จ', error);
+    }
+  });
 
   function displayStatus(status) {
     return ({
@@ -203,9 +372,26 @@
     }
     state.user = user;
     state.profile = data;
+    window.schoolUserRole = data.role;
     window.schoolStudentId = data.student_id;
+    window.setStudentTopButton?.();
     return data;
   }
+
+  window.openCurrentWorkspace = function () {
+    if (!isStaff()) {
+      window.adminEntry?.();
+      history.replaceState({}, '', location.protocol === 'file:' ? '#admin/login' : '/admin/login');
+      return;
+    }
+    hideViews();
+    $('adminApp').classList.remove('hidden');
+    history.replaceState({}, '', location.protocol === 'file:' ? '#admin' : '/admin');
+    renderRows();
+    window.renderQueue();
+    startStaffQueueRefresh();
+    window.setStudentTopButton?.();
+  };
 
   async function loadStudentApplication() {
     const db = requireClient();
@@ -265,17 +451,50 @@
 
   function updateTracking() {
     const status = state.review && state.review.status;
+    const statusKey = status || 'draft';
     const badge = $('trackBadge');
     badge.textContent = displayStatus(status);
     badge.className = `badge ${status === 'approved' ? 'ok' : status === 'denied' ? 'no' : 'wait'}`;
-    $('trackingMessage').textContent = state.review && state.review.reason
-      ? `ครูแจ้งให้แก้ไข: ${state.review.reason}`
-      : status === 'submitted'
-        ? 'ส่งใบสมัครแล้ว · กำลังรอครูตรวจสอบ'
+    $('trackingResult').dataset.status = statusKey;
+    $('trackingStatusTitle').textContent = ({
+      approved: 'ผ่านการตรวจเอกสาร',
+      submitted: 'กำลังรอครูตรวจเอกสาร',
+      denied: 'ไม่ผ่านการตรวจเอกสาร',
+      changes_requested: 'กรุณาแก้ไขเอกสาร',
+      draft: 'ยังไม่ได้ส่งใบสมัคร'
+    })[statusKey] || displayStatus(status);
+    $('trackingStatusIcon').textContent = ({
+      approved: '✓', submitted: '…', denied: '×', changes_requested: '!', draft: '…'
+    })[statusKey] || '…';
+    const reviewReason = String(state.review && state.review.reason || '').trim();
+    const showReason = ['denied', 'changes_requested'].includes(status);
+    $('trackingReason').classList.toggle('hidden', !showReason);
+    $('trackingReasonTitle').textContent = status === 'changes_requested' ? 'สิ่งที่ต้องแก้ไขตามที่ครูแจ้ง' : 'เหตุผลที่ไม่ผ่าน';
+    $('trackingReasonText').textContent = reviewReason || (showReason ? 'ครูยังไม่ได้ระบุเหตุผล กรุณาติดต่อครูผู้ดูแล' : '');
+    $('trackingMessage').textContent = status === 'submitted'
+        ? 'ส่งใบสมัครแล้ว กรุณารอผลการตรวจจากครู'
         : status === 'approved'
-          ? 'ครูตรวจเอกสารผ่านแล้ว ดาวน์โหลดใบสมัคร PDF ที่บันทึกไว้เพื่อนำไปลงนาม'
-          : 'เมื่อส่งใบสมัครแล้ว ระบบจะแสดงผลการตรวจและเหตุผลกรณีต้องแก้ไขที่นี่';
+          ? 'ใบสมัครได้รับการอนุมัติแล้ว ดาวน์โหลดใบสมัคร PDF ได้จากปุ่มด้านล่าง'
+          : status === 'denied'
+            ? 'ครูตรวจใบสมัครแล้ว กรุณาอ่านเหตุผลด้านล่างและติดต่อครูหากต้องการสอบถาม'
+            : status === 'changes_requested'
+              ? 'แก้ไขเอกสารตามคำแนะนำของครู แล้วส่งใบสมัครอีกครั้ง'
+              : 'กรอกข้อมูลและเอกสารให้ครบ จากนั้นยืนยันส่งใบสมัครให้ครูตรวจ';
     $('downloadApp').classList.toggle('hidden', status !== 'approved');
+    const submitPanel = $('submitApplicationButton')?.closest('.card');
+    submitPanel?.classList.toggle('hidden', status === 'approved');
+    let approvedPanel = $('approvedReviewPanel');
+    if (!approvedPanel) {
+      approvedPanel = document.createElement('section');
+      approvedPanel.id = 'approvedReviewPanel';
+      approvedPanel.className = 'card approved-review-card hidden';
+      approvedPanel.innerHTML = '<div class="approved-review-mark" aria-hidden="true">✓</div><h3>ตรวจสอบใบสมัครเรียบร้อย</h3><span class="badge ok">ผ่าน</span><p>ครูตรวจเอกสารและอนุมัติใบสมัครแล้ว คุณไม่ต้องยืนยันส่งใบสมัครซ้ำ</p><button class="btn primary" type="button">ไปหน้าสถานะและดาวน์โหลดใบสมัคร</button>';
+      approvedPanel.querySelector('button').addEventListener('click', () => {
+        document.querySelector('#studentApp .tab[data-pane="track"]')?.click();
+      });
+      $('review')?.append(approvedPanel);
+    }
+    approvedPanel.classList.toggle('hidden', status !== 'approved');
   }
 
   async function signIn(email, password, expectedRole) {
@@ -300,6 +519,7 @@
         refreshReview();
       } else {
         await loadAdminData();
+        await loadAdmissionSchedule();
         hideViews();
         $('adminApp').classList.remove('hidden');
         history.replaceState({}, '', location.protocol === 'file:' ? '#admin' : '/admin');
@@ -311,6 +531,7 @@
       await db.auth.signOut();
       state.user = null;
       state.profile = null;
+      window.schoolUserRole = null;
       throw loadError;
     }
   }
@@ -494,8 +715,10 @@
 
   function getReviewTabIndex(student, index) {
     const plan = Array.isArray(student.choices) ? student.choices[0] : null;
-    if (reviewDistribution === 'by_plan' && Number.isInteger(plan)) {
-      return plan % reviewTabCount;
+    if (reviewDistribution === 'by_room') {
+      const room = String(student.room || '').replace(/^ม\.3\//, '').trim();
+      const assignedTab = reviewClassroomAssignments.findIndex((roomsForTab) => roomsForTab.includes(room));
+      if (assignedTab >= 0) return assignedTab;
     }
     const studentId = String(student.id || '');
     return /^\d+$/.test(studentId) ? Number(studentId) % reviewTabCount : index % reviewTabCount;
@@ -522,6 +745,7 @@
       button.addEventListener('click', () => {
         currentReviewTab = index;
         reviewQueueIndex = 0;
+        $('reviewRoomFilter').value = reviewPlanFilters[index] || '';
         window.adminTab(button);
         window.renderQueue();
       });
@@ -541,18 +765,107 @@
           reviewTabCount = saved.tabCount;
         }
         if (saved.distribution !== undefined) {
-          if (!['balanced', 'by_plan'].includes(saved.distribution)) {
+          if (!['balanced', 'by_plan', 'by_room'].includes(saved.distribution)) {
             throw new Error('Saved document-review distribution is invalid.');
           }
-          reviewDistribution = saved.distribution;
+          reviewDistribution = saved.distribution === 'by_plan' ? 'by_room' : saved.distribution;
         }
+        reviewClassroomAssignments = isValidReviewClassroomAssignments(saved.roomAssignments, reviewTabCount)
+          ? saved.roomAssignments.map((items) => [...items])
+          : createDefaultReviewClassroomAssignments(reviewTabCount);
       }
     } catch (error) {
       reportError('อ่านการตั้งค่าแท็บตรวจเอกสารไม่สำเร็จ', error);
     }
+    if (!reviewClassroomAssignments.length) reviewClassroomAssignments = createDefaultReviewClassroomAssignments(reviewTabCount);
+    draftReviewClassroomAssignments = reviewClassroomAssignments.map((items) => [...items]);
     $('reviewTabCount').value = String(reviewTabCount);
     $('reviewDistribution').value = reviewDistribution;
+    renderReviewTabAssignments();
   }
+
+  function createDefaultReviewClassroomAssignments(tabCount) {
+    const assignments = Array.from({ length: tabCount }, () => []);
+    classOptions.forEach((room, index) => assignments[index % tabCount].push(room));
+    return assignments;
+  }
+
+  function isValidReviewClassroomAssignments(assignments, tabCount) {
+    if (!Array.isArray(assignments) || assignments.length !== tabCount || assignments.some((items) => !Array.isArray(items))) return false;
+    const flat = assignments.flat();
+    return flat.length === classOptions.length
+      && flat.every((room) => typeof room === 'string' && classOptions.includes(room))
+      && new Set(flat).size === classOptions.length;
+  }
+
+  function resizeDraftReviewAssignments(tabCount) {
+    const next = Array.from({ length: tabCount }, (_, index) =>
+      Array.isArray(draftReviewClassroomAssignments[index])
+        ? draftReviewClassroomAssignments[index].filter((room) => classOptions.includes(room))
+        : []
+    );
+    if (tabCount && draftReviewClassroomAssignments.length > tabCount) {
+      draftReviewClassroomAssignments.slice(tabCount).flat().forEach((room) => {
+        if (classOptions.includes(room) && !next[tabCount - 1].includes(room)) next[tabCount - 1].push(room);
+      });
+    }
+    const seen = new Set();
+    next.forEach((items) => {
+      for (let index = items.length - 1; index >= 0; index -= 1) {
+        if (seen.has(items[index])) items.splice(index, 1);
+        else seen.add(items[index]);
+      }
+    });
+    draftReviewClassroomAssignments = next;
+  }
+
+  window.renderReviewTabAssignments = function () {
+    const container = $('reviewTabAssignments');
+    if (!container) return;
+    const tabCount = Number($('reviewTabCount').value);
+    const validCount = Number.isInteger(tabCount) && tabCount >= 1 && tabCount <= 10 ? tabCount : reviewTabCount;
+    resizeDraftReviewAssignments(validCount);
+    $('reviewAssignmentCard').classList.toggle('hidden', $('reviewDistribution').value !== 'by_room');
+    container.replaceChildren();
+    for (let tabIndex = 0; tabIndex < validCount; tabIndex += 1) {
+      const card = document.createElement('section');
+      card.className = 'review-tab-assignment';
+      const heading = document.createElement('b');
+      heading.textContent = `แท็บตรวจเอกสาร ${tabIndex + 1}`;
+      const list = document.createElement('div');
+      list.className = 'review-tab-plan-list';
+      classOptions.forEach((room) => {
+        const label = document.createElement('label');
+        label.className = 'review-plan-option';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = draftReviewClassroomAssignments[tabIndex]?.includes(room) || false;
+        checkbox.addEventListener('change', () => {
+          window.updateReviewRoomAssignment(tabIndex, room, checkbox.checked);
+        });
+        const name = document.createElement('span');
+        name.textContent = `ม.3/${room}`;
+        label.append(checkbox, name);
+        list.append(label);
+      });
+      card.append(heading, list);
+      container.append(card);
+    }
+  };
+
+  window.updateReviewRoomAssignment = function (tabIndex, room, checked) {
+    if (!draftReviewClassroomAssignments[tabIndex]) return;
+    draftReviewClassroomAssignments.forEach((assignedRooms, index) => {
+      if (checked && index !== tabIndex) {
+        draftReviewClassroomAssignments[index] = assignedRooms.filter((assignedRoom) => assignedRoom !== room);
+      }
+    });
+    const assignedRooms = draftReviewClassroomAssignments[tabIndex];
+    draftReviewClassroomAssignments[tabIndex] = checked
+      ? [...new Set([...assignedRooms, room])]
+      : assignedRooms.filter((assignedRoom) => assignedRoom !== room);
+    window.renderReviewTabAssignments();
+  };
 
   window.saveReviewSettings = function () {
     const tabCount = Number($('reviewTabCount').value);
@@ -561,18 +874,25 @@
       return;
     }
     const distribution = $('reviewDistribution').value;
-    if (!['balanced', 'by_plan'].includes(distribution)) {
+    if (!['balanced', 'by_room'].includes(distribution)) {
       toast('เลือกรูปแบบการกระจายนักเรียนให้ถูกต้อง');
       return;
     }
+    const roomAssignments = draftReviewClassroomAssignments.map((items) => [...items]);
+    if (distribution === 'by_room' && !isValidReviewClassroomAssignments(roomAssignments, tabCount)) {
+      toast('กรุณากำหนดห้องเรียน ม.3 ทุกห้องให้ครบหนึ่งแท็บ โดยแต่ละห้องอยู่ได้เพียงแท็บเดียว');
+      return;
+    }
     try {
-      window.localStorage.setItem(reviewSettingsKey, JSON.stringify({ tabCount, distribution }));
+      window.localStorage.setItem(reviewSettingsKey, JSON.stringify({ tabCount, distribution, roomAssignments }));
     } catch (error) {
       reportError('บันทึกการตั้งค่าแท็บตรวจเอกสารไม่สำเร็จ', error);
       return;
     }
     reviewTabCount = tabCount;
     reviewDistribution = distribution;
+    reviewClassroomAssignments = roomAssignments;
+    reviewPlanFilters.length = reviewTabCount;
     currentReviewTab = Math.min(currentReviewTab, reviewTabCount - 1);
     reviewQueueIndex = 0;
     renderReviewTabsNav();
@@ -794,6 +1114,7 @@
       }
       state.user = null;
       state.profile = null;
+      window.schoolUserRole = null;
       state.application = null;
       state.review = null;
       studentLoggedIn = false;
@@ -874,24 +1195,24 @@
       return;
     }
     try {
-      const { data, error } = await requireClient().storage.from(STORAGE_BUCKET).createSignedUrl(path, 300);
-      if (error) {
-        throw error;
+      if (studentOverride) {
+        window.showReviewStudent(studentOverride, kind === 'application_pdf' ? 'application' : kind, 'readonly');
+        return;
       }
-      window.closePdfViewer();
-      ensurePdfModalControls();
-      $('reviewPdfControls').classList.add('hidden');
-      $('pdfViewer').classList.remove('review-mode');
-      $('pdfViewer').classList.add('reader-mode');
-      $('pdfViewerTitle').textContent = documentLabels[kind] || 'เอกสาร';
-      $('pdfViewerMeta').textContent = studentOverride
-        ? `เลขประจำตัว ${studentOverride.id} · ${studentOverride.room}`
-        : '';
-      pdfViewerZoom = 100;
-      $('pdfZoomLabel').textContent = '100%';
-      setPdfViewerSource(data.signedUrl, /\.pdf$/i.test(path));
-      $('pdfViewer').classList.remove('hidden');
-      lockPdfViewerBackground();
+      const form = application.form_data || {};
+      const profileName = state.profile.full_name || '';
+      const prefix = form.prefix || (profileName.match(/^(ด\.ช\.|ด\.ญ\.|นาย|นางสาว)/) || [])[0] || '';
+      const student = {
+        id: state.profile.student_id,
+        user_id: state.user.id,
+        name: `${prefix} ${form.applicant_name || profileName.replace(/^(ด\.ช\.|ด\.ญ\.|นาย|นางสาว)\s*/, '')}`.trim(),
+        room: `ม.3/${form.class_room || state.profile.class_room || '—'}`,
+        choices: Array.isArray(form.choices) ? form.choices : [],
+        application,
+        document_paths: application.document_paths || {},
+        review_status: state.review?.status || 'draft'
+      };
+      window.showReviewStudent(student, kind === 'application_pdf' ? 'application' : kind, 'student-readonly');
     } catch (error) {
       reportError('เปิดเอกสารไม่สำเร็จ', error);
     }
@@ -960,9 +1281,20 @@
       };
       let path = state.application.document_paths.application_pdf;
       if (!path) {
-        toast('กำลังจัดเก็บใบสมัคร PDF…');
-        path = await storePdfForApprovedApplication(student);
-        state.application.document_paths.application_pdf = path;
+        toast('กำลังสร้างใบสมัคร PDF สำหรับดาวน์โหลด…');
+        const pdfBlob = await createApplicationPdfForStudent(student, '');
+        const filename = `ใบสมัครโควตา_${student.id}.pdf`;
+        const objectUrl = URL.createObjectURL(pdfBlob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = filename;
+        link.rel = 'noopener';
+        document.body.append(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        toast('ดาวน์โหลดใบสมัคร PDF แล้ว');
+        return;
       }
       const { data, error } = await requireClient().storage.from(STORAGE_BUCKET)
         .createSignedUrl(path, 300);
@@ -1040,7 +1372,7 @@
         String(student.id),
         student.name,
         student.room,
-        student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || ''}`).join('\n')
+        student.choices
       ];
       values.forEach((value, index) => {
         const cell = document.createElement('td');
@@ -1048,6 +1380,15 @@
           const name = document.createElement('b');
           name.textContent = value;
           cell.append(name);
+        } else if (index === 3) {
+          const choices = document.createElement('div');
+          choices.className = 'student-choice-lines';
+          value.forEach((choice, choiceIndex) => {
+            const line = document.createElement('span');
+            line.textContent = `${choiceIndex + 1}. ${(plans[choice] || {}).name || ''}`;
+            choices.append(line);
+          });
+          cell.append(choices);
         } else {
           cell.textContent = value;
         }
@@ -1078,14 +1419,20 @@
   window.renderQueue = function () {
     const queue = pendingReviewStudents();
     renderReviewTabsNav(queue);
-    activeReviewQueue = queue.filter((student, index) => getReviewTabIndex(student, index) === currentReviewTab);
+    const tabQueue = queue.filter((student, index) => getReviewTabIndex(student, index) === currentReviewTab);
+    const planFilter = reviewPlanFilters[currentReviewTab] || '';
+    activeReviewQueue = tabQueue.filter((student) => !planFilter || student.choices.includes(Number(planFilter)));
     const container = $('reviewQueue');
     container.replaceChildren();
     container.classList.add('review-cards');
     if (!activeReviewQueue.length) {
       const empty = document.createElement('p');
       empty.className = 'smallnote';
-      empty.textContent = queue.length ? 'แท็บนี้ไม่มีเอกสารรอตรวจ' : 'ไม่มีเอกสารรอตรวจ';
+      empty.textContent = !queue.length
+        ? 'ไม่มีเอกสารรอตรวจ'
+        : tabQueue.length && planFilter
+          ? 'ไม่พบเอกสารแผนการเรียนนี้ในแท็บปัจจุบัน'
+          : 'แท็บนี้ไม่มีเอกสารรอตรวจ';
       container.append(empty);
       reviewQueueIndex = 0;
       return;
@@ -1129,6 +1476,12 @@
     });
   };
 
+  window.filterReviewQueue = function () {
+    reviewPlanFilters[currentReviewTab] = $('reviewRoomFilter').value;
+    reviewQueueIndex = 0;
+    window.renderQueue();
+  };
+
   window.currentStudent = function () {
     return activeReviewQueue[reviewQueueIndex] || null;
   };
@@ -1151,6 +1504,10 @@
     }
     const student = queue[studentIndex];
     currentReviewTab = getReviewTabIndex(student, studentIndex);
+    if (!student.choices.includes(Number(reviewPlanFilters[currentReviewTab]))) {
+      reviewPlanFilters[currentReviewTab] = '';
+    }
+    $('reviewRoomFilter').value = reviewPlanFilters[currentReviewTab] || '';
     renderReviewTabsNav(queue);
     const tabButton = $(`reviewTabsNav`).querySelector(`[data-review-tab="${currentReviewTab}"]`);
     window.adminTab(tabButton);
@@ -1384,7 +1741,13 @@
     const closeButton = toolbar.querySelector('.btn');
     toolbar.replaceChildren();
     toolbar.innerHTML = '<button type="button" id="reviewBackButton" class="review-back" aria-label="กลับไปหน้ารายการ">← <span>คิวตรวจ</span></button><div class="review-heading"><div class="review-title-row"><b id="pdfViewerTitle">เอกสาร</b><span id="reviewResultBadge" class="review-result">รอตรวจ</span></div><small id="pdfViewerMeta" class="pdf-viewer-meta"></small><small id="reviewPosition" class="review-position"></small></div><div class="review-header-nav"><button type="button" id="reviewPreviousButton" class="review-icon-btn" aria-label="ผู้สมัครก่อนหน้า">←</button><button type="button" id="reviewNextButton" class="review-icon-btn" aria-label="ผู้สมัครถัดไป">→</button></div>';
-    if (closeButton) { closeButton.textContent = 'ปิด'; closeButton.className = 'review-close'; toolbar.append(closeButton); }
+    if (closeButton) {
+      closeButton.textContent = 'ปิด';
+      closeButton.className = 'review-close';
+      closeButton.removeAttribute('onclick');
+      closeButton.addEventListener('click', () => window.closePdfViewer());
+      toolbar.append(closeButton);
+    }
     $('reviewBackButton').addEventListener('click', () => window.closePdfViewer());
     $('reviewPreviousButton').addEventListener('click', () => window.nextReview(-1));
     $('reviewNextButton').addEventListener('click', () => window.nextReview(1));
@@ -1836,11 +2199,13 @@
     const student = reviewPreviewStudent;
     ensurePdfModalControls();
     updateReviewDownloadButton();
-    document.querySelectorAll('[data-review-document]').forEach((button) => {
+    document.querySelectorAll('#reviewPdfControls [data-review-document]').forEach((button) => {
       button.classList.toggle('soft', button.dataset.reviewDocument === currentReviewDocument);
       button.classList.toggle('ghost', button.dataset.reviewDocument !== currentReviewDocument);
       const pathKey = button.dataset.reviewDocument === 'application' ? 'application_pdf' : button.dataset.reviewDocument;
-      button.disabled = reviewModalMode === 'readonly' && !student?.document_paths?.[pathKey];
+      const hasDocument = Boolean(student?.document_paths?.[pathKey]);
+      button.closest('.review-document-item').hidden = reviewModalMode !== 'review' && !hasDocument;
+      button.disabled = reviewModalMode !== 'review' && !hasDocument;
     });
     if (!student) {
       showPdfViewerMessage('เลือกนักเรียนจากรายการเพื่อตรวจเอกสาร');
@@ -2043,10 +2408,13 @@
     $('pdfViewerTitle').textContent = student.name;
     $('pdfViewerMeta').textContent = `เลขประจำตัว ${student.id} · ${student.room} · ${student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || ''}`).join(' | ')}`;
     const total = activeReviewQueue.length;
-    $('reviewPosition').textContent = viewerMode === 'readonly' ? 'ดูเอกสารที่ส่งแล้ว · อ่านอย่างเดียว' : `คิวตรวจ ${reviewQueueIndex + 1} จาก ${total}`;
-    $('reviewBackButton').innerHTML = viewerMode === 'readonly' ? '← <span>รายชื่อนักเรียน</span>' : '← <span>คิวตรวจ</span>';
-    $('reviewPreviousButton').disabled = viewerMode === 'readonly' || reviewQueueIndex <= 0;
-    $('reviewNextButton').disabled = viewerMode === 'readonly' || reviewQueueIndex >= total - 1;
+    const readOnly = viewerMode !== 'review';
+    $('reviewPosition').textContent = readOnly ? 'ดูเอกสารที่ส่งแล้ว · อ่านอย่างเดียว' : `คิวตรวจ ${reviewQueueIndex + 1} จาก ${total}`;
+    $('reviewBackButton').innerHTML = viewerMode === 'student-readonly'
+      ? '← <span>กลับไปหน้าตรวจสอบ</span>'
+      : viewerMode === 'readonly' ? '← <span>รายชื่อนักเรียน</span>' : '← <span>คิวตรวจ</span>';
+    $('reviewPreviousButton').disabled = readOnly || reviewQueueIndex <= 0;
+    $('reviewNextButton').disabled = readOnly || reviewQueueIndex >= total - 1;
     $('reviewResultBadge').textContent = displayStatus(student.review_status);
     const form = student.application?.form_data || student.form_data || {};
     const facts = [['GPA', form.total_gpa || form.gpa || '—'], ['โทรศัพท์', form.phone || form.address?.phone || '—'], ['แผนที่เลือก', student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || '—'}`).join(' / ') || '—']];
@@ -2057,10 +2425,12 @@
       row.append(term, detail);
       return row;
     }));
-    $('reviewFooterActions').classList.toggle('hidden', viewerMode !== 'review');
-    document.querySelectorAll('[data-review-document]').forEach((button) => {
+    $('reviewFooterActions').classList.toggle('hidden', readOnly);
+    document.querySelectorAll('#reviewPdfControls [data-review-document]').forEach((button) => {
       const pathKey = button.dataset.reviewDocument === 'application' ? 'application_pdf' : button.dataset.reviewDocument;
-      button.disabled = viewerMode === 'readonly' && !student.document_paths?.[pathKey];
+      const hasDocument = Boolean(student.document_paths?.[pathKey]);
+      button.closest('.review-document-item').hidden = readOnly && !hasDocument;
+      button.disabled = readOnly && !hasDocument;
     });
     updateReviewSeenStatus(seen);
     updateReviewDocumentDownloadButtons();
@@ -2259,6 +2629,7 @@
       toast('เชื่อมต่อ Supabase ไม่ได้ กรุณาตรวจการโหลด SDK');
       return;
     }
+    await loadAdmissionSchedule();
     const { data, error } = await client.auth.getSession();
     if (error) {
       reportError('ตรวจสอบสถานะการเข้าสู่ระบบไม่สำเร็จ', error);
@@ -2274,6 +2645,7 @@
         studentLoggedIn = true;
         showStudentHome();
       } else if (isStaff()) {
+        await loadAdmissionSchedule();
         await loadAdminData();
         hideViews();
         $('adminApp').classList.remove('hidden');
@@ -2292,6 +2664,8 @@
     if (!session) {
       state.user = null;
       state.profile = null;
+      window.schoolUserRole = null;
+      window.setStudentTopButton?.();
     }
   });
 
