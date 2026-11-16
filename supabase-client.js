@@ -433,9 +433,14 @@
     staffQueueRefreshTimer = window.setInterval(async () => {
       if (!isStaff() || document.hidden || staffQueueRefreshPending) return;
       staffQueueRefreshPending = true;
+      const previousStudent = reviewPreviewStudent;
+      const previousDocument = currentReviewDocument;
       const selectedUserId = reviewPreviewStudent?.user_id
         || activeReviewQueue[reviewQueueIndex]?.user_id;
-      const viewerOpen = !$('pdfViewer')?.classList.contains('hidden');
+      const viewerOpen = !$('pdfViewer')?.classList.contains('hidden') && reviewModalMode === 'review';
+      const previousPath = previousStudent?.document_paths?.[
+        previousDocument === 'application' ? 'application_pdf' : previousDocument
+      ];
       try {
         await loadAdminData();
         renderRows();
@@ -445,10 +450,22 @@
           if (selectedIndex >= 0) {
             reviewQueueIndex = selectedIndex;
             if (viewerOpen) {
-              window.showReviewStudent(activeReviewQueue[selectedIndex], currentReviewDocument);
+              const refreshedStudent = activeReviewQueue[selectedIndex];
+              const refreshedPath = refreshedStudent.document_paths?.[
+                previousDocument === 'application' ? 'application_pdf' : previousDocument
+              ];
+              if (refreshedPath !== previousPath || previousDocument !== currentReviewDocument) {
+                window.showReviewStudent(refreshedStudent, currentReviewDocument);
+              } else {
+                updateOpenReviewStudent(refreshedStudent, selectedIndex);
+              }
+              window.renderQueue();
             } else {
               window.renderQueue();
             }
+          } else if (viewerOpen && previousStudent) {
+            window.closePdfViewer();
+            toast('รายการนี้ถูกตรวจแล้ว คิวเอกสารถูกอัปเดต');
           }
         }
       } catch (error) {
@@ -956,6 +973,40 @@
     }
   };
 
+  window.downloadStudentApplicationPdf = async function (studentId) {
+    const student = state.queue.find((item) => String(item.id) === String(studentId));
+    if (!student || !['submitted', 'approved'].includes(student.review_status)) {
+      toast('ดาวน์โหลดใบสมัครได้หลังส่งใบสมัครแล้ว');
+      return;
+    }
+    try {
+      let path = student.document_paths.application_pdf;
+      if (!path && student.review_status === 'approved') {
+        toast('กำลังจัดเก็บใบสมัคร PDF…');
+        path = await storePdfForApprovedApplication(student);
+        student.document_paths.application_pdf = path;
+        renderRows();
+      }
+      if (!path) {
+        toast('รายการนี้ไม่มีไฟล์ใบสมัคร PDF');
+        return;
+      }
+      const filename = `ใบสมัครโควตา_${student.id}.pdf`;
+      const { data, error } = await requireClient().storage.from(STORAGE_BUCKET)
+        .createSignedUrl(path, 300, { download: filename });
+      if (error) throw error;
+      const link = document.createElement('a');
+      link.href = data.signedUrl;
+      link.download = filename;
+      link.rel = 'noopener';
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      reportError('ดาวน์โหลดใบสมัคร PDF ไม่สำเร็จ', error);
+    }
+  };
+
   window.renderRows = function () {
     const query = ($('searchStudents')?.value || '').toLowerCase();
     const room = $('roomFilter')?.value || '';
@@ -999,15 +1050,27 @@
       statusCell.innerHTML = statusBadge(student.status);
       row.append(statusCell);
       const actionCell = document.createElement('td');
-      const button = document.createElement('button');
-      button.className = 'linkbtn';
+      const actions = document.createElement('div');
+      actions.className = 'student-document-actions';
+      const wasSubmitted = ['submitted', 'changes_requested', 'approved', 'denied', 'final_approved'].includes(student.review_status);
+      const hasAnySubmittedDocument = ['application_pdf', 'photo', 'transcript', 'conduct']
+        .some((kind) => Boolean(student.document_paths[kind]));
+      const viewButton = document.createElement('button');
+      viewButton.className = 'linkbtn';
+      viewButton.textContent = 'ดูเอกสาร';
+      viewButton.disabled = !wasSubmitted || !hasAnySubmittedDocument;
+      viewButton.title = viewButton.disabled ? 'ดูได้หลังส่งเอกสารเข้าระบบแล้ว' : 'ดูเอกสารที่นักเรียนส่งแบบอ่านอย่างเดียว';
+      viewButton.addEventListener('click', () => window.openStudentDocuments(student.id));
+      actions.append(viewButton);
       const hasApplicationPdf = Boolean(student.document_paths.application_pdf);
-      button.textContent = hasApplicationPdf
-        ? 'ดูใบสมัคร PDF'
-        : student.review_status === 'approved' ? 'สร้างใบสมัคร PDF' : 'ยังไม่มีใบสมัคร PDF';
-      button.disabled = !hasApplicationPdf && !['approved', 'submitted'].includes(student.review_status);
-      button.addEventListener('click', () => window.openStudentApplicationPdf(student.id));
-      actionCell.append(button);
+      if (hasApplicationPdf || student.review_status === 'approved') {
+        const downloadButton = document.createElement('button');
+        downloadButton.className = 'linkbtn';
+        downloadButton.textContent = hasApplicationPdf ? 'ดาวน์โหลดใบสมัคร' : 'สร้างและดาวน์โหลด';
+        downloadButton.addEventListener('click', () => window.downloadStudentApplicationPdf(student.id));
+        actions.append(downloadButton);
+      }
+      actionCell.append(actions);
       row.append(actionCell);
       body.append(row);
     });
@@ -1381,6 +1444,13 @@
     const zoomWrap = document.createElement('div');
     zoomWrap.className = 'review-floating-tools';
     zoomWrap.append(zoomControls);
+    const downloadButton = document.createElement('button');
+    downloadButton.type = 'button';
+    downloadButton.id = 'reviewDownloadButton';
+    downloadButton.className = 'btn ghost';
+    downloadButton.textContent = 'ดาวน์โหลด';
+    downloadButton.addEventListener('click', () => window.downloadCurrentReviewDocument());
+    zoomWrap.append(downloadButton);
     $('reviewStage').prepend(zoomWrap);
   }
 
@@ -1460,18 +1530,25 @@
   }
 
   function disposePdfJsDocument() {
+    const handleDestroyError = (message) => (error) => {
+      const text = String(error?.message || error || '');
+      if (error?.name === 'RenderingCancelledException' || /worker was terminated|worker is destroyed|transport.*destroy/i.test(text)) {
+        return;
+      }
+      reportError(message, error);
+    };
     if (pdfJsLoadingTask) {
       const task = pdfJsLoadingTask;
       pdfJsLoadingTask = null;
       pdfJsLoadingPromise = null;
       pdfJsLoadingSource = '';
-      void task.destroy().catch((error) => reportError('หยุดโหลด PDF ไม่สำเร็จ', error));
+      void task.destroy().catch(handleDestroyError('หยุดโหลด PDF ไม่สำเร็จ'));
     }
     if (pdfJsDocument) {
       const pdf = pdfJsDocument;
       pdfJsDocument = null;
       pdfJsDocumentSource = '';
-      void pdf.destroy().catch((error) => reportError('ปิดเอกสาร PDF ไม่สำเร็จ', error));
+      void pdf.destroy().catch(handleDestroyError('ปิดเอกสาร PDF ไม่สำเร็จ'));
     }
   }
 
@@ -1487,7 +1564,12 @@
     const promise = task.promise
       .then((pdf) => {
         if (pdfJsLoadingTask !== task) {
-          void pdf.destroy();
+          void pdf.destroy().catch((error) => {
+            const text = String(error?.message || error || '');
+            if (!/worker was terminated|worker is destroyed|transport.*destroy/i.test(text)) {
+              console.error('ปิด PDF ที่โหลดไม่ทันสำเร็จ', error);
+            }
+          });
           return null;
         }
         pdfJsDocument = pdf;
@@ -1575,7 +1657,9 @@
           }
         } catch (error) {
           pageContainer.dataset.rendering = 'false';
-          if (error?.name !== 'RenderingCancelledException' && requestId === pdfJsRenderRequest) {
+          const expectedCancellation = error?.name === 'RenderingCancelledException'
+            || /worker was terminated|worker is destroyed|transport.*destroy/i.test(String(error?.message || error || ''));
+          if (!expectedCancellation && requestId === pdfJsRenderRequest) {
             pageContainer.textContent = `แสดงหน้า ${pageNumber} ไม่สำเร็จ`;
             reportError(`แสดงหน้า ${pageNumber} ของ PDF ไม่สำเร็จ`, error);
           }
@@ -1741,9 +1825,12 @@
   function renderReviewDocument() {
     const student = reviewPreviewStudent;
     ensurePdfModalControls();
+    updateReviewDownloadButton();
     document.querySelectorAll('[data-review-document]').forEach((button) => {
       button.classList.toggle('soft', button.dataset.reviewDocument === currentReviewDocument);
       button.classList.toggle('ghost', button.dataset.reviewDocument !== currentReviewDocument);
+      const pathKey = button.dataset.reviewDocument === 'application' ? 'application_pdf' : button.dataset.reviewDocument;
+      button.disabled = reviewModalMode === 'readonly' && !student?.document_paths?.[pathKey];
     });
     if (!student) {
       showPdfViewerMessage('เลือกนักเรียนจากรายการเพื่อตรวจเอกสาร');
@@ -1820,7 +1907,64 @@
     seen.add(documentType);
     reviewSeenDocuments.set(reviewPreviewStudent?.user_id, seen);
     updateReviewSeenStatus(seen);
+    updateReviewDownloadButton();
     renderReviewDocument();
+  };
+
+  function currentReviewDocumentPath() {
+    const student = reviewPreviewStudent;
+    if (!student) return '';
+    const pathKey = currentReviewDocument === 'application' ? 'application_pdf' : currentReviewDocument;
+    return student.document_paths?.[pathKey] || '';
+  }
+
+  function updateReviewDownloadButton() {
+    const button = $('reviewDownloadButton');
+    if (button) button.disabled = !currentReviewDocumentPath();
+  }
+
+  window.downloadCurrentReviewDocument = async function () {
+    const student = reviewPreviewStudent;
+    const path = currentReviewDocumentPath();
+    if (!student || !path) {
+      toast('เอกสารนี้ไม่มีไฟล์ให้ดาวน์โหลด');
+      return;
+    }
+    try {
+      const labels = { application_pdf: 'ใบสมัคร', photo: 'รูปถ่าย', transcript: 'ปพ1', conduct: 'ใบรับรองความประพฤติ' };
+      const pathKey = currentReviewDocument === 'application' ? 'application_pdf' : currentReviewDocument;
+      const extension = path.split('.').pop()?.split('?')[0] || 'file';
+      const filename = `${labels[pathKey] || 'เอกสาร'}_${student.id}.${extension}`;
+      const { data, error } = await requireClient().storage.from(STORAGE_BUCKET)
+        .createSignedUrl(path, 300, { download: filename });
+      if (error) throw error;
+      const link = document.createElement('a');
+      link.href = data.signedUrl;
+      link.download = filename;
+      link.rel = 'noopener';
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      reportError('ดาวน์โหลดเอกสารไม่สำเร็จ', error);
+    }
+  };
+
+  window.openStudentDocuments = function (studentId) {
+    const student = state.queue.find((item) => String(item.id) === String(studentId));
+    const allowedStatuses = ['submitted', 'changes_requested', 'approved', 'denied', 'final_approved'];
+    if (!student || !allowedStatuses.includes(student.review_status)) {
+      toast('ดูเอกสารได้หลังนักเรียนยืนยันส่งใบสมัครแล้ว');
+      return;
+    }
+    if (!['application_pdf', 'photo', 'transcript', 'conduct'].some((key) => student.document_paths?.[key])) {
+      toast('ไม่พบเอกสารที่นักเรียนส่ง');
+      return;
+    }
+    const firstAvailableDocument = student.document_paths.application_pdf
+      ? 'application'
+      : ['photo', 'transcript', 'conduct'].find((kind) => student.document_paths[kind]) || 'application';
+    window.showReviewStudent(student, firstAvailableDocument, 'readonly');
   };
 
   function updateReviewSeenStatus(seen) {
@@ -1829,7 +1973,28 @@
     if ($('reviewSeenStatus')) $('reviewSeenStatus').textContent = `เปิดดูเอกสารแล้ว ${count} จาก 4`;
   }
 
-  window.showReviewStudent = async function (student, documentType = 'application') {
+  function updateOpenReviewStudent(student, index) {
+    // Update queue metadata without calling renderReviewDocument(): doing so would
+    // cancel PDF.js' active page renders and restart the same document every poll.
+    reviewPreviewStudent = student;
+    $('pdfViewerTitle').textContent = student.name;
+    $('pdfViewerMeta').textContent = `เลขประจำตัว ${student.id} · ${student.room} · ${student.choices.map((choice, choiceIndex) => `${choiceIndex + 1}. ${(plans[choice] || {}).name || ''}`).join(' | ')}`;
+    $('reviewPosition').textContent = `คิวตรวจ ${index + 1} จาก ${activeReviewQueue.length}`;
+    $('reviewPreviousButton').disabled = index <= 0;
+    $('reviewNextButton').disabled = index >= activeReviewQueue.length - 1;
+    $('reviewResultBadge').textContent = displayStatus(student.review_status);
+    const form = student.application?.form_data || student.form_data || {};
+    const facts = [['GPA', form.total_gpa || form.gpa || '—'], ['โทรศัพท์', form.phone || form.address?.phone || '—'], ['แผนที่เลือก', student.choices.map((choice, choiceIndex) => `${choiceIndex + 1}. ${(plans[choice] || {}).name || '—'}`).join(' / ') || '—']];
+    $('reviewFacts').replaceChildren(...facts.map(([label, value]) => {
+      const row = document.createElement('div');
+      const term = document.createElement('dt'); term.textContent = label;
+      const detail = document.createElement('dd'); detail.textContent = String(value);
+      row.append(term, detail);
+      return row;
+    }));
+  }
+
+  window.showReviewStudent = async function (student, documentType = 'application', viewerMode = 'review') {
     if (!student) {
       return;
     }
@@ -1841,7 +2006,7 @@
     const seen = reviewSeenDocuments.get(student.user_id) || new Set();
     seen.add(documentType);
     reviewSeenDocuments.set(student.user_id, seen);
-    reviewModalMode = 'review';
+    reviewModalMode = viewerMode;
     reviewDocumentLoads = {};
     ensurePdfModalControls();
     $('reviewPdfControls').classList.remove('hidden');
@@ -1851,10 +2016,11 @@
     $('pdfViewerTitle').textContent = student.name;
     $('pdfViewerMeta').textContent = `เลขประจำตัว ${student.id} · ${student.room} · ${student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || ''}`).join(' | ')}`;
     const total = activeReviewQueue.length;
-    $('reviewPosition').textContent = `คิวตรวจ ${reviewQueueIndex + 1} จาก ${total}`;
-    $('reviewPreviousButton').disabled = reviewQueueIndex <= 0;
-    $('reviewNextButton').disabled = reviewQueueIndex >= total - 1;
-    $('reviewResultBadge').textContent = student.review_status === 'approved' ? 'ผ่าน' : student.review_status === 'rejected' ? 'ไม่ผ่าน' : 'รอตรวจ';
+    $('reviewPosition').textContent = viewerMode === 'readonly' ? 'ดูเอกสารที่ส่งแล้ว · อ่านอย่างเดียว' : `คิวตรวจ ${reviewQueueIndex + 1} จาก ${total}`;
+    $('reviewBackButton').innerHTML = viewerMode === 'readonly' ? '← <span>รายชื่อนักเรียน</span>' : '← <span>คิวตรวจ</span>';
+    $('reviewPreviousButton').disabled = viewerMode === 'readonly' || reviewQueueIndex <= 0;
+    $('reviewNextButton').disabled = viewerMode === 'readonly' || reviewQueueIndex >= total - 1;
+    $('reviewResultBadge').textContent = displayStatus(student.review_status);
     const form = student.application?.form_data || student.form_data || {};
     const facts = [['GPA', form.total_gpa || form.gpa || '—'], ['โทรศัพท์', form.phone || form.address?.phone || '—'], ['แผนที่เลือก', student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || '—'}`).join(' / ') || '—']];
     $('reviewFacts').replaceChildren(...facts.map(([label, value]) => {
@@ -1864,6 +2030,11 @@
       row.append(term, detail);
       return row;
     }));
+    $('reviewFooterActions').classList.toggle('hidden', viewerMode !== 'review');
+    document.querySelectorAll('[data-review-document]').forEach((button) => {
+      const pathKey = button.dataset.reviewDocument === 'application' ? 'application_pdf' : button.dataset.reviewDocument;
+      button.disabled = viewerMode === 'readonly' && !student.document_paths?.[pathKey];
+    });
     updateReviewSeenStatus(seen);
     renderReviewDocument();
   };

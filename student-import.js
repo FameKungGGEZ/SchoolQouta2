@@ -17,6 +17,36 @@
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[char]);
 
+  function parseCsv(text) {
+    const source = String(text || '').replace(/^\ufeff/, '');
+    const matrix = [];
+    let row = [];
+    let value = '';
+    let quoted = false;
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+      if (quoted && char === '"' && source[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = !quoted;
+      } else if (!quoted && char === ',') {
+        row.push(value); value = '';
+      } else if (!quoted && (char === '\n' || char === '\r')) {
+        if (char === '\r' && source[index + 1] === '\n') index += 1;
+        row.push(value); value = '';
+        if (row.some((cell) => String(cell).trim())) matrix.push(row);
+        row = [];
+      } else {
+        value += char;
+      }
+    }
+    row.push(value);
+    if (row.some((cell) => String(cell).trim())) matrix.push(row);
+    if (quoted) throw new Error('ไฟล์ CSV มีเครื่องหมายอัญประกาศไม่ครบ');
+    return matrix;
+  }
+
   function normalizeDate(value) {
     if (typeof value === 'number' && window.XLSX) {
       const date = XLSX.SSF.parse_date_code(value);
@@ -55,7 +85,16 @@
       if (seen.has(row.student_id)) problems.push('รหัสซ้ำในไฟล์');
       if (row.student_id) seen.add(row.student_id);
       if (!row.given_name || !row.surname) problems.push('ชื่อ/สกุลไม่ครบ');
-      if (!/^\d{2}\/\d{2}\/\d{4}$/.test(row.date_of_birth)) problems.push('วันเกิดไม่ถูกต้อง');
+      const birthDate = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(row.date_of_birth);
+      if (!birthDate) {
+        problems.push('วันเกิดไม่ถูกต้อง');
+      } else {
+        const day = Number(birthDate[1]);
+        const month = Number(birthDate[2]);
+        const year = Number(birthDate[3]) - 543;
+        const daysInMonth = month >= 1 && month <= 12 ? new Date(year, month, 0).getDate() : 0;
+        if (year < 1800 || day < 1 || day > daysInMonth) problems.push('วันเกิดไม่ถูกต้อง');
+      }
       if (problems.length) rowIssues.push(`แถว ${index + 2}: ${problems.join(', ')}`);
     });
   }
@@ -94,13 +133,19 @@
       setMessage('โหลดตัวอ่าน Excel ไม่สำเร็จ กรุณารีเฟรชหน้าแล้วลองใหม่');
       return;
     }
+    const isCsv = /\.csv$/i.test(file.name) || /csv/i.test(file.type);
     const reader = new FileReader();
     reader.onerror = () => setMessage('อ่านไฟล์ไม่สำเร็จ');
     reader.onload = () => {
       try {
-        const workbook = XLSX.read(reader.result, { type: 'array', cellDates: false });
-        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-        const matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: true, defval: '' });
+        let matrix;
+        if (isCsv) {
+          matrix = parseCsv(reader.result);
+        } else {
+          const workbook = XLSX.read(reader.result, { type: 'array', cellDates: false });
+          const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+          matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: true, defval: '' });
+        }
         if (matrix.length < 2) throw new Error('ไฟล์ไม่มีแถวข้อมูล');
         const headers = matrix[0].map(normalizeHeader);
         const missing = ['student_id', 'given_name', 'surname', 'date_of_birth']
@@ -126,7 +171,8 @@
         setMessage(error.message || 'อ่านไฟล์ไม่สำเร็จ');
       }
     };
-    reader.readAsArrayBuffer(file);
+    if (/\.csv$/i.test(file.name) || /csv/i.test(file.type)) reader.readAsText(file, 'utf-8');
+    else reader.readAsArrayBuffer(file);
   };
 
   window.submitStudentImportFile = async function () {
