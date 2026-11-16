@@ -940,6 +940,12 @@
     });
   };
 
+  function signedUrlWithDownloadName(signedUrl, filename) {
+    const url = new URL(signedUrl);
+    url.searchParams.set('download', filename);
+    return url.toString();
+  }
+
   window.printApplication = async function () {
     if (!state.review || state.review.status !== 'approved') {
       toast('ปุ่มพิมพ์จะแสดงหลังครูตรวจผ่าน');
@@ -959,11 +965,12 @@
         state.application.document_paths.application_pdf = path;
       }
       const { data, error } = await requireClient().storage.from(STORAGE_BUCKET)
-        .createSignedUrl(path, 300, { download: `ใบสมัครโควตา_${student.id}.pdf` });
+        .createSignedUrl(path, 300);
       if (error) throw error;
       const link = document.createElement('a');
-      link.href = data.signedUrl;
-      link.download = `ใบสมัครโควตา_${student.id}.pdf`;
+      const filename = `ใบสมัครโควตา_${student.id}.pdf`;
+      link.href = signedUrlWithDownloadName(data.signedUrl, filename);
+      link.download = filename;
       link.rel = 'noopener';
       document.body.append(link);
       link.click();
@@ -993,10 +1000,10 @@
       }
       const filename = `ใบสมัครโควตา_${student.id}.pdf`;
       const { data, error } = await requireClient().storage.from(STORAGE_BUCKET)
-        .createSignedUrl(path, 300, { download: filename });
+        .createSignedUrl(path, 300);
       if (error) throw error;
       const link = document.createElement('a');
-      link.href = data.signedUrl;
+      link.href = signedUrlWithDownloadName(data.signedUrl, filename);
       link.download = filename;
       link.rel = 'noopener';
       document.body.append(link);
@@ -1062,14 +1069,6 @@
       viewButton.title = viewButton.disabled ? 'ดูได้หลังส่งเอกสารเข้าระบบแล้ว' : 'ดูเอกสารที่นักเรียนส่งแบบอ่านอย่างเดียว';
       viewButton.addEventListener('click', () => window.openStudentDocuments(student.id));
       actions.append(viewButton);
-      const hasApplicationPdf = Boolean(student.document_paths.application_pdf);
-      if (hasApplicationPdf || student.review_status === 'approved') {
-        const downloadButton = document.createElement('button');
-        downloadButton.className = 'linkbtn';
-        downloadButton.textContent = hasApplicationPdf ? 'ดาวน์โหลดใบสมัคร' : 'สร้างและดาวน์โหลด';
-        downloadButton.addEventListener('click', () => window.downloadStudentApplicationPdf(student.id));
-        actions.append(downloadButton);
-      }
       actionCell.append(actions);
       row.append(actionCell);
       body.append(row);
@@ -1421,13 +1420,24 @@
       ['transcript', 'ปพ.1'],
       ['conduct', 'ใบรับรอง']
     ].forEach(([kind, label]) => {
+      const item = document.createElement('div');
+      item.className = 'review-document-item';
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'btn ghost';
       button.dataset.reviewDocument = kind;
       button.textContent = label;
       button.addEventListener('click', () => window.viewDocument(kind));
-      documentButtons.append(button);
+      const download = document.createElement('button');
+      download.type = 'button';
+      download.className = 'btn ghost review-document-download';
+      download.dataset.downloadDocument = kind;
+      download.textContent = '↓';
+      download.title = `ดาวน์โหลด${label}`;
+      download.setAttribute('aria-label', `ดาวน์โหลด${label}`);
+      download.addEventListener('click', () => window.downloadReviewDocument(kind));
+      item.append(button, download);
+      documentButtons.append(item);
     });
     const reviewActions = $('reviewFooterActions');
     [
@@ -1921,25 +1931,34 @@
   function updateReviewDownloadButton() {
     const button = $('reviewDownloadButton');
     if (button) button.disabled = !currentReviewDocumentPath();
+    updateReviewDocumentDownloadButtons();
   }
 
-  window.downloadCurrentReviewDocument = async function () {
+  function updateReviewDocumentDownloadButtons() {
+    document.querySelectorAll('[data-download-document]').forEach((button) => {
+      const kind = button.dataset.downloadDocument;
+      const pathKey = kind === 'application' ? 'application_pdf' : kind;
+      button.disabled = !reviewPreviewStudent?.document_paths?.[pathKey];
+    });
+  }
+
+  window.downloadReviewDocument = async function (documentType = currentReviewDocument) {
     const student = reviewPreviewStudent;
-    const path = currentReviewDocumentPath();
+    const pathKey = documentType === 'application' ? 'application_pdf' : documentType;
+    const path = student?.document_paths?.[pathKey] || '';
     if (!student || !path) {
       toast('เอกสารนี้ไม่มีไฟล์ให้ดาวน์โหลด');
       return;
     }
     try {
       const labels = { application_pdf: 'ใบสมัคร', photo: 'รูปถ่าย', transcript: 'ปพ1', conduct: 'ใบรับรองความประพฤติ' };
-      const pathKey = currentReviewDocument === 'application' ? 'application_pdf' : currentReviewDocument;
       const extension = path.split('.').pop()?.split('?')[0] || 'file';
       const filename = `${labels[pathKey] || 'เอกสาร'}_${student.id}.${extension}`;
       const { data, error } = await requireClient().storage.from(STORAGE_BUCKET)
-        .createSignedUrl(path, 300, { download: filename });
+        .createSignedUrl(path, 300);
       if (error) throw error;
       const link = document.createElement('a');
-      link.href = data.signedUrl;
+      link.href = signedUrlWithDownloadName(data.signedUrl, filename);
       link.download = filename;
       link.rel = 'noopener';
       document.body.append(link);
@@ -1948,6 +1967,10 @@
     } catch (error) {
       reportError('ดาวน์โหลดเอกสารไม่สำเร็จ', error);
     }
+  };
+
+  window.downloadCurrentReviewDocument = function () {
+    return window.downloadReviewDocument(currentReviewDocument);
   };
 
   window.openStudentDocuments = function (studentId) {
@@ -2040,6 +2063,7 @@
       button.disabled = viewerMode === 'readonly' && !student.document_paths?.[pathKey];
     });
     updateReviewSeenStatus(seen);
+    updateReviewDocumentDownloadButtons();
     renderReviewDocument();
   };
 
