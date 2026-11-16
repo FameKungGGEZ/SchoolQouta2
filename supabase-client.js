@@ -2011,6 +2011,10 @@
     ensurePdfModalControls();
     $('reviewPdfControls').classList.remove('hidden');
     lockPdfViewerBackground();
+    // A previous read-only PDF popup can leave this class on the shared modal.
+    // Clear it before opening the full document-review layout so its document
+    // navigation and download controls remain visible.
+    $('pdfViewer').classList.remove('reader-mode');
     $('pdfViewer').classList.add('review-mode');
     $('pdfViewer').classList.remove('hidden');
     $('pdfViewerTitle').textContent = student.name;
