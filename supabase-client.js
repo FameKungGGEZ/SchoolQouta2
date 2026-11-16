@@ -58,6 +58,9 @@
   const originalClosePdfViewer = window.closePdfViewer;
   const originalShowSchedule = window.showSchedule;
   let admissionSchedule = [];
+  let allStudentsPage = 1;
+  let photoValidationPromise = Promise.resolve(true);
+  let photoValidationRequest = 0;
 
   function reportError(message, error) {
     console.error(message, error);
@@ -261,10 +264,11 @@
 
   function displayStatus(status) {
     return ({
-      draft: 'กำลังกรอก',
+      draft: 'ยังไม่ส่ง',
       submitted: 'รอตรวจ',
-      changes_requested: 'แก้ไขเอกสาร',
+      changes_requested: 'ไม่ผ่าน',
       approved: 'ผ่าน',
+      final_approved: 'ผ่าน',
       denied: 'ไม่ผ่าน'
     })[status] || 'ยังไม่ได้ส่ง';
   }
@@ -561,6 +565,9 @@
 
   async function uploadFile(kind, file) {
     const db = requireClient();
+    if (kind === 'photo' && !(await decodeImageFile(file))) {
+      throw new Error('ไฟล์รูปภาพเสียหรือเปิดอ่านไม่ได้ กรุณาเลือกรูปใหม่');
+    }
     const oldPath = state.application.document_paths[kind];
     const path = filePath(file, kind);
     const { error: uploadError } = await db.storage.from(STORAGE_BUCKET).upload(path, file, {
@@ -585,6 +592,35 @@
       if (removeError) {
         reportError('บันทึกไฟล์ใหม่แล้ว แต่ลบไฟล์เดิมไม่สำเร็จ', removeError);
       }
+    }
+  }
+
+  async function decodeImageFile(file) {
+    if (!file || !file.type || !file.type.startsWith('image/')) return false;
+    if (typeof createImageBitmap === 'function') {
+      try {
+        const bitmap = await createImageBitmap(file);
+        const valid = bitmap.width > 0 && bitmap.height > 0;
+        bitmap.close?.();
+        return valid;
+      } catch (_) {
+        return false;
+      }
+    }
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      image.src = objectUrl;
+      if (typeof image.decode === 'function') await image.decode();
+      else await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = reject;
+      });
+      return image.naturalWidth > 0 && image.naturalHeight > 0;
+    } catch (_) {
+      return false;
+    } finally {
+      URL.revokeObjectURL(objectUrl);
     }
   }
 
@@ -1134,16 +1170,48 @@
       input.value = '';
       return;
     }
-    if (photoUrl.startsWith('blob:')) {
-      URL.revokeObjectURL(photoUrl);
-    }
-    photoUrl = URL.createObjectURL(file);
-    $('photoPreview').querySelector('img')?.remove();
-    const image = document.createElement('img');
-    image.src = photoUrl;
-    image.alt = 'รูปผู้สมัคร';
-    $('photoPreview').prepend(image);
-    refreshReview();
+    const requestId = ++photoValidationRequest;
+    photoValidationPromise = (async () => {
+      const valid = await decodeImageFile(file);
+      if (requestId !== photoValidationRequest) return false;
+      if (!valid) {
+        input.value = '';
+        toast('ไฟล์รูปภาพเสียหรือเปิดอ่านไม่ได้ กรุณาเลือกรูปใหม่');
+        refreshSubmitApplicationButton();
+        return false;
+      }
+      const nextUrl = URL.createObjectURL(file);
+      const image = document.createElement('img');
+      image.alt = 'รูปผู้สมัคร';
+      image.src = nextUrl;
+      try {
+        if (typeof image.decode === 'function') {
+          await image.decode();
+        } else {
+          await new Promise((resolve, reject) => {
+            image.onload = resolve;
+            image.onerror = reject;
+          });
+        }
+      } catch (_) {
+        URL.revokeObjectURL(nextUrl);
+        if (requestId !== photoValidationRequest) return false;
+        input.value = '';
+        toast('ไม่สามารถแสดงรูปภาพนี้ได้ กรุณาเลือกรูปใหม่');
+        refreshSubmitApplicationButton();
+        return false;
+      }
+      if (requestId !== photoValidationRequest) {
+        URL.revokeObjectURL(nextUrl);
+        return false;
+      }
+      if (photoUrl.startsWith('blob:')) URL.revokeObjectURL(photoUrl);
+      photoUrl = nextUrl;
+      $('photoPreview').querySelector('img')?.remove();
+      $('photoPreview').prepend(image);
+      refreshReview();
+      return true;
+    })();
   };
 
   window.savePersonal = async function () {
@@ -1154,6 +1222,9 @@
     try {
       const formData = currentFormData();
       const photoFile = $('photoFile').files && $('photoFile').files[0];
+      if (photoFile && !(await photoValidationPromise)) {
+        throw new Error('ไฟล์รูปภาพเสียหรือเปิดอ่านไม่ได้ กรุณาเลือกรูปใหม่');
+      }
       await persistApplication(formData, state.application.document_paths);
       if (photoFile) {
         await uploadFile('photo', photoFile);
@@ -1346,27 +1417,135 @@
     }
   };
 
+  window.filterRows = function () {
+    allStudentsPage = 1;
+    window.renderRows();
+  };
+
+  window.goToStudentPage = function (page) {
+    allStudentsPage = Math.max(1, Number(page) || 1);
+    window.renderRows();
+  };
+
+  function renderStudentPagination(total, pageSize, page, pageCount) {
+    const pagination = $('studentPagination');
+    if (!pagination) return;
+    pagination.replaceChildren();
+    const first = total ? (page - 1) * pageSize + 1 : 0;
+    const last = Math.min(page * pageSize, total);
+    const summary = document.createElement('span');
+    summary.textContent = `แสดง ${first}–${last} จาก ${total} คน · หน้า ${page} จาก ${pageCount}`;
+    const controls = document.createElement('div');
+    controls.className = 'toolbar';
+    const previous = document.createElement('button');
+    previous.type = 'button';
+    previous.className = 'btn ghost';
+    previous.textContent = '← ก่อนหน้า';
+    previous.disabled = page <= 1;
+    previous.addEventListener('click', () => window.goToStudentPage(page - 1));
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.className = 'btn ghost';
+    next.textContent = 'ถัดไป →';
+    next.disabled = page >= pageCount;
+    next.addEventListener('click', () => window.goToStudentPage(page + 1));
+    controls.append(previous, next);
+    pagination.append(summary, controls);
+  }
+
   window.renderRows = function () {
-    const query = ($('searchStudents')?.value || '').toLowerCase();
+    const query = ($('searchStudents')?.value || '').trim().toLowerCase();
     const room = $('roomFilter')?.value || '';
     const status = $('statusFilter')?.value || '';
+    const selectedPlan = room === '' ? null : plans[Number(room)];
+    const subjectColumns = selectedPlan ? selectedPlan.subjects : [];
+    const tableHead = $('studentTableHead');
+    if (tableHead) {
+      const headerRow = document.createElement('tr');
+      ['เลขประจำตัว', 'ชื่อ-สกุล', 'ห้องเดิม', 'แผนที่เลือก'].forEach((label) => {
+        const cell = document.createElement('th');
+        cell.textContent = label;
+        headerRow.append(cell);
+      });
+      subjectColumns.forEach((subject) => {
+        const cell = document.createElement('th');
+        cell.className = 'student-subject-header';
+        cell.textContent = `เฉลี่ย 5 เทอม · ${subject}`;
+        headerRow.append(cell);
+      });
+      const totalGpaHeader = document.createElement('th');
+      totalGpaHeader.className = 'student-total-gpa-header';
+      totalGpaHeader.textContent = 'เกรดเฉลี่ยรวม 5 เทอม';
+      headerRow.append(totalGpaHeader);
+      ['สถานะ', 'เอกสาร'].forEach((label) => {
+        const cell = document.createElement('th');
+        cell.textContent = label;
+        headerRow.append(cell);
+      });
+      tableHead.replaceChildren(headerRow);
+    }
     const rows = students.filter((student) =>
       (student.name.toLowerCase().includes(query) || String(student.id).includes(query))
       && (!room || student.choices.includes(Number(room)))
       && (!status || student.status === status)
     );
+    const sortMode = $('studentSort')?.value || 'document';
+    const documentOrder = (student) => {
+      const timestamp = student.submitted_at ? Date.parse(student.submitted_at) : NaN;
+      return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
+    };
+    const compareDocumentOrder = (a, b) =>
+      documentOrder(a) - documentOrder(b)
+      || Number(a.id) - Number(b.id)
+      || String(a.id).localeCompare(String(b.id), 'th');
+    if (sortMode === 'room') {
+      const configuredRooms = ($('classRoomOptions')?.value || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const roomOrder = new Map(configuredRooms.map((value, index) => [value, index]));
+      const roomName = (student) => String(student.room || '').split('/').pop().trim();
+      rows.sort((a, b) => {
+        const aOrder = roomOrder.has(roomName(a)) ? roomOrder.get(roomName(a)) : Number.MAX_SAFE_INTEGER;
+        const bOrder = roomOrder.has(roomName(b)) ? roomOrder.get(roomName(b)) : Number.MAX_SAFE_INTEGER;
+        return aOrder - bOrder || compareDocumentOrder(a, b);
+      });
+    } else if (sortMode === 'gpa') {
+      const gradePointAverage = (student) => {
+        const formData = student.application?.form_data || {};
+        const value = Number(formData.total_gpa ?? formData.gpa);
+        return Number.isFinite(value) ? value : null;
+      };
+      rows.sort((a, b) => {
+        const aGpa = gradePointAverage(a);
+        const bGpa = gradePointAverage(b);
+        if (aGpa === null && bGpa !== null) return 1;
+        if (bGpa === null && aGpa !== null) return -1;
+        return (bGpa ?? 0) - (aGpa ?? 0) || compareDocumentOrder(a, b);
+      });
+    } else {
+      rows.sort(compareDocumentOrder);
+    }
+
+    const sizeControl = $('studentPageSize');
+    const pageSize = Math.min(100, Math.max(10, Number(sizeControl?.value) || 10));
+    const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+    allStudentsPage = Math.min(allStudentsPage, pageCount);
+    const page = allStudentsPage;
+    const visibleRows = rows.slice((page - 1) * pageSize, page * pageSize);
     const body = $('studentRows');
     body.replaceChildren();
     if (!rows.length) {
       const empty = document.createElement('tr');
       const cell = document.createElement('td');
-      cell.colSpan = 6;
+      cell.colSpan = 7 + subjectColumns.length;
       cell.textContent = 'ไม่พบข้อมูล';
       empty.append(cell);
       body.append(empty);
+      renderStudentPagination(0, pageSize, 1, 1);
       return;
     }
-    rows.forEach((student) => {
+    visibleRows.forEach((student) => {
       const row = document.createElement('tr');
       const values = [
         String(student.id),
@@ -1394,10 +1573,28 @@
         }
         row.append(cell);
       });
+      const formData = student.application?.form_data || {};
+      const scores = formData.scores || {};
+      subjectColumns.forEach((subject) => {
+        const cell = document.createElement('td');
+        cell.className = 'student-subject-cell';
+        const average = scores[`average:${subject}`];
+        cell.textContent = average === undefined || average === null || String(average).trim() === ''
+          ? '—'
+          : String(average);
+        row.append(cell);
+      });
+      const totalGpaCell = document.createElement('td');
+      totalGpaCell.className = 'student-total-gpa-cell';
+      const totalGpa = formData.total_gpa ?? formData.gpa ?? '';
+      totalGpaCell.textContent = String(totalGpa).trim() || '—';
+      row.append(totalGpaCell);
       const statusCell = document.createElement('td');
+      statusCell.className = 'student-status-cell';
       statusCell.innerHTML = statusBadge(student.status);
       row.append(statusCell);
       const actionCell = document.createElement('td');
+      actionCell.className = 'student-documents-cell';
       const actions = document.createElement('div');
       actions.className = 'student-document-actions';
       const wasSubmitted = ['submitted', 'changes_requested', 'approved', 'denied', 'final_approved'].includes(student.review_status);
@@ -1414,8 +1611,8 @@
       row.append(actionCell);
       body.append(row);
     });
+    renderStudentPagination(rows.length, pageSize, page, pageCount);
   };
-
   window.renderQueue = function () {
     const queue = pendingReviewStudents();
     renderReviewTabsNav(queue);
@@ -1740,7 +1937,7 @@
     toolbar.classList.add('review-header');
     const closeButton = toolbar.querySelector('.btn');
     toolbar.replaceChildren();
-    toolbar.innerHTML = '<button type="button" id="reviewBackButton" class="review-back" aria-label="กลับไปหน้ารายการ">← <span>คิวตรวจ</span></button><div class="review-heading"><div class="review-title-row"><b id="pdfViewerTitle">เอกสาร</b><span id="reviewResultBadge" class="review-result">รอตรวจ</span></div><small id="pdfViewerMeta" class="pdf-viewer-meta"></small><small id="reviewPosition" class="review-position"></small></div><div class="review-header-nav"><button type="button" id="reviewPreviousButton" class="review-icon-btn" aria-label="ผู้สมัครก่อนหน้า">←</button><button type="button" id="reviewNextButton" class="review-icon-btn" aria-label="ผู้สมัครถัดไป">→</button></div>';
+    toolbar.innerHTML = '<button type="button" id="reviewBackButton" class="review-back" aria-label="กลับไปหน้ารายการ">← <span>คิวตรวจ</span></button><div class="review-heading"><div class="review-title-row"><b id="pdfViewerTitle">เอกสาร</b><span id="reviewResultBadge" class="review-result">รอตรวจ</span></div><small id="pdfViewerMeta" class="pdf-viewer-meta"></small><div id="reviewReasonNotice" class="review-reason-notice hidden" role="note" aria-live="polite"></div><small id="reviewPosition" class="review-position"></small></div><div class="review-header-nav"><button type="button" id="reviewPreviousButton" class="review-icon-btn" aria-label="ผู้สมัครก่อนหน้า">←</button><button type="button" id="reviewNextButton" class="review-icon-btn" aria-label="ผู้สมัครถัดไป">→</button></div>';
     if (closeButton) {
       closeButton.textContent = 'ปิด';
       closeButton.className = 'review-close';
@@ -2338,7 +2535,7 @@
     return window.downloadReviewDocument(currentReviewDocument);
   };
 
-  window.openStudentDocuments = function (studentId) {
+  window.openStudentDocuments = async function (studentId) {
     const student = state.queue.find((item) => String(item.id) === String(studentId));
     const allowedStatuses = ['submitted', 'changes_requested', 'approved', 'denied', 'final_approved'];
     if (!student || !allowedStatuses.includes(student.review_status)) {
@@ -2348,6 +2545,20 @@
     if (!['application_pdf', 'photo', 'transcript', 'conduct'].some((key) => student.document_paths?.[key])) {
       toast('ไม่พบเอกสารที่นักเรียนส่ง');
       return;
+    }
+    if (student.review_status === 'approved' && !student.document_paths.application_pdf) {
+      try {
+        toast('กำลังสร้างและจัดเก็บใบสมัคร PDF…');
+        const path = await storePdfForApprovedApplication(student);
+        student.document_paths.application_pdf = path;
+        if (student.application) {
+          student.application.document_paths = Object.assign({}, student.application.document_paths, { application_pdf: path });
+        }
+        renderRows();
+      } catch (error) {
+        reportError('เปิดใบสมัคร PDF ไม่สำเร็จ', error);
+        return;
+      }
     }
     const firstAvailableDocument = student.document_paths.application_pdf
       ? 'application'
@@ -2361,6 +2572,18 @@
     if ($('reviewSeenStatus')) $('reviewSeenStatus').textContent = `เปิดดูเอกสารแล้ว ${count} จาก 4`;
   }
 
+  function updateReviewReasonNotice(student) {
+    const notice = $('reviewReasonNotice');
+    if (!notice) return;
+    const status = student.review_status;
+    const showReason = status === 'denied' || status === 'changes_requested';
+    const label = status === 'changes_requested' ? 'สิ่งที่ต้องแก้ไข: ' : 'เหตุผลที่ไม่ผ่าน: ';
+    const reason = String(student.reason || '').trim();
+    notice.dataset.status = status || '';
+    notice.textContent = showReason ? `${label}${reason || 'ยังไม่ได้ระบุเหตุผล'}` : '';
+    notice.classList.toggle('hidden', !showReason);
+  }
+
   function updateOpenReviewStudent(student, index) {
     // Update queue metadata without calling renderReviewDocument(): doing so would
     // cancel PDF.js' active page renders and restart the same document every poll.
@@ -2371,6 +2594,7 @@
     $('reviewPreviousButton').disabled = index <= 0;
     $('reviewNextButton').disabled = index >= activeReviewQueue.length - 1;
     $('reviewResultBadge').textContent = displayStatus(student.review_status);
+    updateReviewReasonNotice(student);
     const form = student.application?.form_data || student.form_data || {};
     const facts = [['GPA', form.total_gpa || form.gpa || '—'], ['โทรศัพท์', form.phone || form.address?.phone || '—'], ['แผนที่เลือก', student.choices.map((choice, choiceIndex) => `${choiceIndex + 1}. ${(plans[choice] || {}).name || '—'}`).join(' / ') || '—']];
     $('reviewFacts').replaceChildren(...facts.map(([label, value]) => {
@@ -2416,6 +2640,7 @@
     $('reviewPreviousButton').disabled = readOnly || reviewQueueIndex <= 0;
     $('reviewNextButton').disabled = readOnly || reviewQueueIndex >= total - 1;
     $('reviewResultBadge').textContent = displayStatus(student.review_status);
+    updateReviewReasonNotice(student);
     const form = student.application?.form_data || student.form_data || {};
     const facts = [['GPA', form.total_gpa || form.gpa || '—'], ['โทรศัพท์', form.phone || form.address?.phone || '—'], ['แผนที่เลือก', student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || '—'}`).join(' / ') || '—']];
     $('reviewFacts').replaceChildren(...facts.map(([label, value]) => {
