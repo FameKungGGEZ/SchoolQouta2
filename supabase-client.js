@@ -32,6 +32,9 @@
   const submittedPdfRetryAfter = new Map();
   let staffQueueRefreshTimer = null;
   let staffQueueRefreshPending = false;
+  let studentReviewRefreshTimer = null;
+  let studentReviewChannel = null;
+  let studentReviewRequest = null;
   let reviewDocumentLoads = {};
   let pdfViewerSource = '';
   let pdfViewerZoom = 100;
@@ -307,7 +310,7 @@
     const button = $('submitApplicationButton');
     if (!button) return;
     const missing = getSubmissionMissingItems();
-    button.disabled = missing.length > 0 || !$('confirmAccuracy')?.checked;
+    button.disabled = studentWriteBlocked() || missing.length > 0 || !$('confirmAccuracy')?.checked;
     button.title = missing.length ? `ยังกรอกไม่ครบ: ${missing.join(' · ')}` : '';
   }
 
@@ -452,6 +455,85 @@
     updateTracking();
     refreshReview();
   }
+
+  function applyStudentReview(review) {
+    const previousStatus = state.review?.status || null;
+    const previousReason = state.review?.reason || null;
+    const nextStatus = review?.status || null;
+    const nextReason = review?.reason || null;
+    if (previousStatus === nextStatus && previousReason === nextReason) return;
+
+    state.review = review;
+    $('studentStatus').textContent = displayStatus(nextStatus);
+    updateTracking();
+    refreshSubmitApplicationButton();
+    if (previousStatus === 'submitted' && ['approved', 'denied', 'changes_requested'].includes(nextStatus)) {
+      toast(nextStatus === 'approved'
+        ? 'ครูตรวจและอนุมัติใบสมัครแล้ว'
+        : 'ครูแจ้งผลตรวจแล้ว กรุณาดูรายละเอียดที่แท็บสถานะการสมัคร');
+    }
+  }
+
+  async function refreshStudentReview() {
+    if (!studentLoggedIn || state.profile?.role !== 'student' || !state.user) return;
+    if (studentReviewRequest) {
+      studentReviewRequest.refreshAgain = true;
+      return;
+    }
+    const request = { userId: state.user.id, previousReview: state.review, refreshAgain: false };
+    studentReviewRequest = request;
+    try {
+      const { data, error } = await requireClient()
+        .from('application_reviews')
+        .select('status, reason, submitted_at')
+        .eq('user_id', request.userId)
+        .maybeSingle();
+      if (error) throw error;
+      if (studentReviewRequest === request && state.review === request.previousReview) {
+        applyStudentReview(data);
+      }
+    } catch (error) {
+      console.warn('Unable to refresh student review status', error);
+    } finally {
+      if (studentReviewRequest === request) {
+        studentReviewRequest = null;
+        if (request.refreshAgain) void refreshStudentReview();
+      }
+    }
+  }
+
+  function stopStudentReviewRefresh() {
+    studentReviewRequest = null;
+    if (studentReviewRefreshTimer) {
+      window.clearInterval(studentReviewRefreshTimer);
+      studentReviewRefreshTimer = null;
+    }
+    if (studentReviewChannel && client) {
+      void client.removeChannel(studentReviewChannel);
+      studentReviewChannel = null;
+    }
+  }
+
+  function startStudentReviewRefresh() {
+    stopStudentReviewRefresh();
+    if (!state.user || state.profile?.role !== 'student') return;
+    void refreshStudentReview();
+    studentReviewRefreshTimer = window.setInterval(() => {
+      if (!document.hidden) void refreshStudentReview();
+    }, 5000);
+    if (typeof client?.channel === 'function') {
+      studentReviewChannel = client
+        .channel(`student-review:${state.user.id}`, { config: { private: true } })
+        .on('broadcast', { event: 'review-changed' }, () => void refreshStudentReview())
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') void refreshStudentReview();
+        });
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && studentLoggedIn) void refreshStudentReview();
+  });
 
   function updateTracking() {
     const status = state.review && state.review.status;
@@ -617,6 +699,7 @@
         await loadStudentApplication();
         studentLoggedIn = true;
         showStudentHome();
+        startStudentReviewRefresh();
         refreshSubmitApplicationButton();
         refreshReview();
       } else {
@@ -1291,6 +1374,7 @@
       if (error) {
         throw error;
       }
+      stopStudentReviewRefresh();
       state.user = null;
       state.profile = null;
       window.schoolUserRole = null;
@@ -1504,13 +1588,19 @@
       return;
     }
     try {
+      const { data: application, error: applicationError } = await requireClient()
+        .from('applications')
+        .select('user_id, form_data, document_paths, application_number, updated_at')
+        .eq('user_id', state.user.id)
+        .single();
+      if (applicationError) throw applicationError;
       const student = {
         id: state.profile.student_id,
         user_id: state.user.id,
-        application: state.application,
-        document_paths: state.application.document_paths
+        application,
+        document_paths: application.document_paths
       };
-      let path = state.application.document_paths.application_pdf;
+      const path = application.document_paths.application_pdf;
       if (!path) {
         toast('กำลังสร้างใบสมัคร PDF สำหรับดาวน์โหลด…');
         const pdfBlob = await createApplicationPdfForStudent(student, '');
@@ -3032,6 +3122,7 @@
         await loadStudentApplication();
         studentLoggedIn = true;
         showStudentHome();
+        startStudentReviewRefresh();
       } else if (isStaff()) {
         await loadAdmissionSchedule();
         await loadAdminData();
@@ -3050,6 +3141,7 @@
 
   client && client.auth.onAuthStateChange((_event, session) => {
     if (!session) {
+      stopStudentReviewRefresh();
       state.user = null;
       state.profile = null;
       window.schoolUserRole = null;
