@@ -41,6 +41,14 @@ node .\scripts\seed-demo-data.mjs --dry-run
 
 ใช้ [Cleanup Demo Data](supabase/bootstrap/CLEANUP_DEMO_DATA.sql) ใน Supabase SQL Editor เมื่อต้องการลบบัญชีนักเรียนที่สร้างจากสคริปต์ seed พร้อมใบสมัครและผลตรวจ สคริปต์เลือกจากเครื่องหมาย `demo_seed` ใน Supabase Auth และเก็บบัญชีครู ผู้ดูแล และนักเรียนที่ไม่มีเครื่องหมายนี้ไว้
 
+เปิด SQL Editor ของโปรเจกต์ที่เว็บเชื่อมต่ออยู่ ตรวจรหัสโปรเจกต์จากค่าส่วนหน้าของ `SUPABASE_URL` ใน `supabase-client.js` แล้วตรวจตารางด้วยคำสั่งนี้
+
+```sql
+select to_regclass('public.profiles') as profiles;
+```
+
+หากผลเป็น `NULL` ให้ตรวจโปรเจกต์อีกครั้ง สำหรับโปรเจกต์ใหม่ให้ติดตั้ง schema ตามหัวข้อ [ตั้งค่า Supabase](#ตั้งค่า-supabase) ก่อนใช้สคริปต์ล้างข้อมูล
+
 ตรวจรายการไฟล์ของบัญชีจำลองก่อนรัน SQL แล้วลบไฟล์ที่อยู่ในผลลัพธ์ผ่านหน้า Storage หรือ Storage API
 
 ```sql

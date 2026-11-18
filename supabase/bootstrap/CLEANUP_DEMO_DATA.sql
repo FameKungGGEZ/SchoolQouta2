@@ -3,6 +3,18 @@
 -- or Dashboard, then rerun this transaction.
 begin;
 
+do $check_schema$
+begin
+  if to_regclass('public.profiles') is null
+    or to_regclass('public.applications') is null
+    or to_regclass('public.application_reviews') is null
+  then
+    raise exception 'SchoolQouta2 tables are missing from this database'
+      using hint = 'Open the Supabase project used by the website. For a new project, apply the SchoolQouta2 schema first.';
+  end if;
+end
+$check_schema$;
+
 create temporary table schoolquota_demo_cleanup_targets on commit drop as
 select u.id
 from auth.users u
