@@ -37,6 +37,28 @@ node .\scripts\seed-demo-data.mjs --dry-run
 
 สคริปต์สร้าง Auth users ภายใน, profiles, ใบสมัคร และอัปโหลดไฟล์ไปยัง private bucket โดยไม่เขียน service key ลงดิสก์ สร้างไฟล์เข้าสู่ระบบทดสอบ `test-data/demo-student-logins.csv` ซึ่งถูก `.gitignore` ไว้; เก็บไฟล์นี้ไว้เฉพาะในสภาพแวดล้อมทดสอบ และลบข้อมูลทดสอบก่อนใช้งานจริง สคริปต์จะปฏิเสธการเขียนทับบัญชีหรือใบสมัครที่ไม่ได้ทำเครื่องหมายเป็นข้อมูลทดสอบ
 
+## ล้างข้อมูลทดสอบ
+
+ใช้ [Cleanup Demo Data](supabase/bootstrap/CLEANUP_DEMO_DATA.sql) ใน Supabase SQL Editor เมื่อต้องการลบบัญชีนักเรียนที่สร้างจากสคริปต์ seed พร้อมใบสมัครและผลตรวจ สคริปต์เลือกจากเครื่องหมาย `demo_seed` ใน Supabase Auth และเก็บบัญชีครู ผู้ดูแล และนักเรียนที่ไม่มีเครื่องหมายนี้ไว้
+
+ตรวจรายการไฟล์ของบัญชีจำลองก่อนรัน SQL แล้วลบไฟล์ที่อยู่ในผลลัพธ์ผ่านหน้า Storage หรือ Storage API
+
+```sql
+select o.name
+from storage.objects o
+join auth.users u on split_part(o.name, '/', 1) = u.id::text
+join public.profiles p on p.user_id = u.id
+where o.bucket_id = 'application-documents'
+  and p.role = 'student'
+  and u.raw_user_meta_data->>'demo_seed' in (
+    'school-quota-demo-2026',
+    'school-quota-demo-20-2026'
+  )
+order by o.name;
+```
+
+ไฟล์ SQL อยู่ใน `supabase/bootstrap` สำหรับรันด้วยตนเอง และจะหยุดก่อนลบบัญชีหากยังพบไฟล์แนบของบัญชีจำลอง
+
 ## ความปลอดภัยและข้อมูลทดสอบ
 
 - ตารางและ bucket ใช้ RLS; ไฟล์เอกสารเป็น private และเปิดผ่าน signed URL อายุสั้น
