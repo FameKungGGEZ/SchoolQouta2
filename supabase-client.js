@@ -643,15 +643,11 @@
     return `${state.user.id}/${kind}/${crypto.randomUUID()}-${safeName}`;
   }
 
-  async function persistApplication(formData, documentPaths) {
+  async function persistApplication(changes) {
     const { data, error } = await requireClient()
       .from('applications')
-      .upsert({
-        user_id: state.user.id,
-        form_data: formData,
-        document_paths: documentPaths,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'user_id' })
+      .update({ ...changes, updated_at: new Date().toISOString() })
+      .eq('user_id', state.user.id)
       .select('user_id, form_data, document_paths, application_number, updated_at')
       .single();
     if (error) {
@@ -680,7 +676,7 @@
     }
     const documentPaths = Object.assign({}, state.application.document_paths, { [kind]: path });
     try {
-      await persistApplication(state.application.form_data, documentPaths);
+      await persistApplication({ document_paths: documentPaths });
     } catch (error) {
       const { error: cleanupError } = await db.storage.from(STORAGE_BUCKET).remove([path]);
       if (cleanupError) {
@@ -1154,6 +1150,27 @@
     }
   }
 
+  async function ensureRequiredDocumentsExist() {
+    const storage = requireClient().storage.from(STORAGE_BUCKET);
+    for (const kind of ['photo', 'transcript', 'conduct']) {
+      const path = state.application.document_paths[kind] || '';
+      const separator = path.lastIndexOf('/');
+      const fileName = path.slice(separator + 1);
+      if (path.startsWith(`${state.user.id}/`) && fileName) {
+        const { data, error } = await storage.list(path.slice(0, separator), { limit: 100, search: fileName });
+        if (error) throw error;
+        if (data?.some((item) => item.name === fileName && item.id !== null)) continue;
+      }
+      const file = kind === 'photo' ? $('photoFile')?.files[0] : files[kind];
+      if (file) {
+        await uploadFile(kind, file);
+        continue;
+      }
+      const label = documentLabels[kind] || 'เอกสาร';
+      throw new Error(`ไม่พบไฟล์ ${label} ในพื้นที่จัดเก็บ กรุณาเลือกไฟล์และกดบันทึกใหม่ก่อนส่งใบสมัคร`);
+    }
+  }
+
   async function storeSubmittedApplicationPdf(student) {
     const pdfBlob = await createApplicationPdfForStudent(student, '');
     const path = await uploadApplicationPdf(student, pdfBlob);
@@ -1355,7 +1372,7 @@
       if (photoFile && !(await photoValidationPromise)) {
         throw new Error('รูปโปรไฟล์ต้องเป็นไฟล์ PNG หรือ JPG ที่ถูกต้อง');
       }
-      await persistApplication(formData, state.application.document_paths);
+      await persistApplication({ form_data: formData });
       if (photoFile) {
         await uploadFile('photo', photoFile);
       }
@@ -1438,14 +1455,15 @@
       refreshSubmitApplicationButton();
       return;
     }
-    const paths = state.application.document_paths;
     modal('ยืนยันการส่งใบสมัคร', 'เมื่อส่งแล้ว ใบสมัครจะเข้าสู่คิวตรวจเอกสาร', false, async () => {
       const confirmButton = $('modalConfirm');
       confirmButton.disabled = true;
       confirmButton.textContent = 'กำลังส่งใบสมัคร…';
       try {
         const formData = currentFormData();
-        await persistApplication(formData, paths);
+        await persistApplication({ form_data: formData });
+        await ensureRequiredDocumentsExist();
+        const paths = Object.assign({}, state.application.document_paths);
         const applicant = {
           id: state.profile.student_id,
           user_id: state.user.id,
@@ -1465,7 +1483,11 @@
       } catch (error) {
         confirmButton.disabled = false;
         confirmButton.textContent = 'ยืนยัน';
-        reportError('ส่งใบสมัครไม่สำเร็จ', error);
+        const missingDocument = String(error?.message || '').match(/Required document was not uploaded: (photo|transcript|conduct)/);
+        const message = missingDocument
+          ? `ไม่พบไฟล์ ${documentLabels[missingDocument[1]]} ในพื้นที่จัดเก็บ กรุณาเลือกไฟล์และกดบันทึกใหม่ก่อนส่งใบสมัคร`
+          : error?.message || 'เกิดข้อผิดพลาด กรุณาลองใหม่';
+        reportError(`ส่งใบสมัครไม่สำเร็จ · ${message}`, error);
       }
     });
   };
