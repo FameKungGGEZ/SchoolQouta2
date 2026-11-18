@@ -67,6 +67,23 @@ order by o.name;
 
 ไฟล์ SQL อยู่ใน `supabase/bootstrap` สำหรับรันด้วยตนเอง และจะหยุดก่อนลบบัญชีหากยังพบไฟล์แนบของบัญชีจำลอง
 
+## รีเซ็ตระบบให้เหลือบัญชีหลังบ้านหนึ่งบัญชี
+
+ใช้ [Reset Keep Admin](supabase/bootstrap/RESET_KEEP_ADMIN.sql) เมื่อต้องการลบบัญชีอื่นทั้งหมด รวมถึงใบสมัคร ผลตรวจ และประกาศกำหนดการ สำหรับโปรเจกต์ Supabase ที่ใช้กับ SchoolQouta2 โดยเฉพาะ
+
+1. ใน SQL Editor ของโปรเจกต์ที่เว็บใช้ ให้ตรวจบัญชีหลังบ้านด้วย SQL ด้านล่าง แล้วนำ UUID ของบัญชีที่ต้องการเก็บไปแทนค่า `keep_user_id` ในไฟล์
+2. ลบไฟล์ทั้งหมดใน bucket `application-documents` ผ่านหน้า Storage ของ Supabase หรือ Storage API สคริปต์ SQL จะหยุดก่อนลบข้อมูลหากยังพบไฟล์
+3. รันไฟล์ SQL ที่แก้ UUID แล้วใน SQL Editor สคริปต์จะเก็บบัญชีและโปรไฟล์เดิมไว้พร้อมตรวจว่าเหลือเพียงบัญชีเดียว
+
+```sql
+select u.id, u.email, p.role
+from auth.users u
+join public.profiles p on p.user_id = u.id
+where p.role in ('admin', 'teacher');
+```
+
+ไฟล์นี้เรียกใช้ด้วยตนเองจาก `supabase/bootstrap` เพื่อให้การ deploy ตามปกติไม่รีเซ็ตข้อมูล
+
 ## ความปลอดภัยและข้อมูลทดสอบ
 
 - ตารางและ bucket ใช้ RLS; ไฟล์เอกสารเป็น private และเปิดผ่าน signed URL อายุสั้น
