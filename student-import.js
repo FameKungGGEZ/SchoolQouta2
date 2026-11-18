@@ -47,27 +47,25 @@
     return matrix;
   }
 
-  function normalizeDate(value) {
-    if (typeof value === 'number' && window.XLSX) {
-      const date = XLSX.SSF.parse_date_code(value);
-      if (date) return `${String(date.d).padStart(2, '0')}/${String(date.m).padStart(2, '0')}/${date.y + 543}`;
-    }
+  function formatBirthDate(day, month, year) {
+    const numericYear = Number(year);
+    const buddhistYear = numericYear < 2400 ? numericYear + 543 : numericYear;
+    return `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${buddhistYear}`;
+  }
+
+  function normalizeDate(value, date1904) {
     const raw = String(value || '').trim();
-    if (/^\d{4,5}$/.test(raw) && window.XLSX) {
-      const date = XLSX.SSF.parse_date_code(Number(raw));
-      if (date) return `${String(date.d).padStart(2, '0')}/${String(date.m).padStart(2, '0')}/${date.y + 543}`;
+    if ((typeof value === 'number' || /^\d{4,5}$/.test(raw)) && window.XLSX) {
+      const date = XLSX.SSF.parse_date_code(Number(value), { date1904 });
+      if (date) return formatBirthDate(date.d, date.m, date.y);
     }
     let match = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
     if (match) {
-      let year = Number(match[3]);
-      if (year < 2400) year += 543;
-      return `${match[1].padStart(2, '0')}/${match[2].padStart(2, '0')}/${year}`;
+      return formatBirthDate(match[1], match[2], match[3]);
     }
     match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
     if (match) {
-      let year = Number(match[1]);
-      if (year < 2400) year += 543;
-      return `${match[3].padStart(2, '0')}/${match[2].padStart(2, '0')}/${year}`;
+      return formatBirthDate(match[3], match[2], match[1]);
     }
     return raw;
   }
@@ -93,7 +91,9 @@
         const month = Number(birthDate[2]);
         const year = Number(birthDate[3]) - 543;
         const daysInMonth = month >= 1 && month <= 12 ? new Date(year, month, 0).getDate() : 0;
-        if (year < 1800 || day < 1 || day > daysInMonth) problems.push('วันเกิดไม่ถูกต้อง');
+        if (year < 2400 - 543 || year > 2700 - 543 || day < 1 || day > daysInMonth) {
+          problems.push('วันเกิดไม่ถูกต้อง');
+        }
       }
       if (problems.length) rowIssues.push(`แถว ${index + 2}: ${problems.join(', ')}`);
     });
@@ -142,10 +142,12 @@
     reader.onload = () => {
       try {
         let matrix;
+        let date1904 = false;
         if (isCsv) {
           matrix = parseCsv(reader.result);
         } else {
           const workbook = XLSX.read(reader.result, { type: 'array', cellDates: false });
+          date1904 = workbook.Workbook?.WBProps?.date1904 === true;
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
           matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: true, defval: '' });
         }
@@ -163,7 +165,7 @@
           prefix: String(getValue(cells, 'prefix')).trim(),
           given_name: String(getValue(cells, 'given_name')).trim(),
           surname: String(getValue(cells, 'surname')).trim(),
-          date_of_birth: normalizeDate(getValue(cells, 'date_of_birth')),
+          date_of_birth: normalizeDate(getValue(cells, 'date_of_birth'), date1904),
           class_room: String(getValue(cells, 'class_room')).trim(),
           seat_number: String(getValue(cells, 'seat_number')).trim()
         })).filter((row) => row.student_id || row.given_name || row.surname);
