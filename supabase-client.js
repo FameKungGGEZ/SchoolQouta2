@@ -447,7 +447,7 @@
       }
       photoUrl = signed.signedUrl;
       $('reviewPhotoImage').src = photoUrl;
-      $('photoPreview').innerHTML = `<img src="${photoUrl}" alt="รูปผู้สมัคร"><input id="photoFile" type="file" accept="image/*" onchange="previewPhoto(this)">`;
+      $('photoPreview').innerHTML = `<img src="${photoUrl}" alt="รูปผู้สมัคร"><input id="photoFile" type="file" accept="image/png,image/jpeg" onchange="previewPhoto(this)">`;
     }
     updateTracking();
     refreshReview();
@@ -485,8 +485,10 @@
               ? 'แก้ไขเอกสารตามคำแนะนำของครู แล้วส่งใบสมัครอีกครั้ง'
               : 'กรอกข้อมูลและเอกสารให้ครบ จากนั้นยืนยันส่งใบสมัครให้ครูตรวจ';
     $('downloadApp').classList.toggle('hidden', status !== 'approved');
+    $('cancelApplicationButton')?.classList.toggle('hidden', status !== 'submitted');
+    const isReadOnly = Boolean(status && !['draft', 'changes_requested'].includes(status));
     const submitPanel = $('submitApplicationButton')?.closest('.card');
-    submitPanel?.classList.toggle('hidden', status === 'approved');
+    submitPanel?.classList.toggle('hidden', isReadOnly);
     let approvedPanel = $('approvedReviewPanel');
     if (!approvedPanel) {
       approvedPanel = document.createElement('section');
@@ -499,7 +501,103 @@
       $('review')?.append(approvedPanel);
     }
     approvedPanel.classList.toggle('hidden', status !== 'approved');
+    updateStudentEditability();
   }
+
+  function updateStudentEditability() {
+    const status = state.review && state.review.status;
+    const readOnly = Boolean(status && !['draft', 'changes_requested'].includes(status));
+    const noticeText = status === 'submitted'
+      ? 'ส่งใบสมัครแล้วและกำลังรอตรวจ ข้อมูลและเอกสารถูกล็อกไว้ หากต้องการแก้ไข ให้ไปที่แท็บสถานะการสมัครแล้วกดยกเลิกการสมัคร'
+      : ['approved', 'final_approved'].includes(status)
+        ? 'ใบสมัครผ่านแล้ว สามารถดาวน์โหลดเอกสารได้จากแท็บสถานะ'
+        : status === 'denied'
+          ? 'ใบสมัครไม่ผ่าน กรุณาอ่านเหตุผลในแท็บสถานะและติดต่อครูผู้ตรวจ'
+          : '';
+    ['personal', 'documents', 'review'].forEach((paneId) => {
+      const pane = $(paneId);
+      if (!pane) return;
+      let notice = pane.querySelector('.student-edit-lock-note');
+      if (!readOnly) {
+        notice?.remove();
+        return;
+      }
+      if (!notice) {
+        notice = document.createElement('div');
+        notice.className = 'callout student-edit-lock-note';
+        notice.setAttribute('role', 'status');
+        pane.prepend(notice);
+      }
+      notice.textContent = noticeText;
+    });
+    const personal = $('personal');
+    personal?.querySelectorAll('input:not([readonly]), select, textarea').forEach((control) => {
+      control.disabled = readOnly;
+    });
+    const savePersonalButton = personal?.querySelector('button[onclick="savePersonal()"]');
+    if (savePersonalButton) savePersonalButton.disabled = readOnly;
+    const documents = $('documents');
+    documents?.querySelectorAll('input[type="file"]').forEach((control) => {
+      control.disabled = readOnly;
+      control.closest('label')?.classList.toggle('student-edit-locked', readOnly);
+    });
+    documents?.querySelectorAll('button[onclick^="saveDoc("]').forEach((button) => {
+      button.disabled = readOnly;
+    });
+    const accuracy = $('confirmAccuracy');
+    if (accuracy) accuracy.disabled = readOnly;
+    const submitButton = $('submitApplicationButton');
+    if (submitButton && readOnly) submitButton.disabled = true;
+  }
+
+  function studentWriteBlocked() {
+    const status = state.review && state.review.status;
+    return Boolean(status && !['draft', 'changes_requested'].includes(status));
+  }
+
+  window.cancelApplicationSubmission = function () {
+    if (!state.user || !state.profile || state.profile.role !== 'student') {
+      toast('กรุณาเข้าสู่ระบบนักเรียนก่อน');
+      return;
+    }
+    if (!state.review || state.review.status !== 'submitted') {
+      toast('ยกเลิกได้เฉพาะใบสมัครที่กำลังรอตรวจ');
+      return;
+    }
+    window.modal?.(
+      'ยกเลิกการสมัคร',
+      'ใบสมัครจะออกจากคิวตรวจและกลับเป็นฉบับร่าง คุณจะกลับไปแก้ข้อมูลและเอกสารได้ แล้วต้องยืนยันส่งใหม่อีกครั้ง',
+      false,
+      async () => {
+        const confirmButton = $('modalConfirm');
+        confirmButton.disabled = true;
+        confirmButton.textContent = 'กำลังยกเลิก…';
+        try {
+          const { data: oldPdfPath, error } = await requireClient().rpc('cancel_application_submission');
+          if (error) throw error;
+
+          const pdfPath = oldPdfPath || state.application?.document_paths?.application_pdf;
+          if (state.application?.document_paths) delete state.application.document_paths.application_pdf;
+          state.review = { status: 'draft', reason: null, submitted_at: null };
+          $('studentStatus').textContent = displayStatus('draft');
+          updateTracking();
+          refreshReview();
+          refreshSubmitApplicationButton();
+          window.closeModal?.();
+
+          if (pdfPath) {
+            await removeApplicationPdf(pdfPath, 'ยกเลิกแล้ว แต่ลบใบสมัคร PDF ฉบับเดิมไม่สำเร็จ');
+          }
+          document.querySelector('#studentApp .tab[data-pane="personal"]')?.click();
+          toast('ยกเลิกการส่งแล้ว กลับมาแก้ไขข้อมูลและเอกสารได้');
+        } catch (error) {
+          confirmButton.disabled = false;
+          confirmButton.textContent = 'ยืนยัน';
+          reportError('ยกเลิกใบสมัครไม่สำเร็จ', error);
+        }
+      }
+    );
+  };
 
   async function signIn(email, password, expectedRole) {
     const db = requireClient();
@@ -565,8 +663,11 @@
 
   async function uploadFile(kind, file) {
     const db = requireClient();
-    if (kind === 'photo' && !(await decodeImageFile(file))) {
-      throw new Error('ไฟล์รูปภาพเสียหรือเปิดอ่านไม่ได้ กรุณาเลือกรูปใหม่');
+    if (['transcript', 'conduct'].includes(kind) && !(await isPdfDocument(file))) {
+      throw new Error('กรุณาเลือกเอกสาร PDF ที่ถูกต้องเท่านั้น');
+    }
+    if (kind === 'photo' && !(await isProfileImage(file))) {
+      throw new Error('รูปโปรไฟล์ต้องเป็นไฟล์ PNG หรือ JPG ที่ถูกต้อง');
     }
     const oldPath = state.application.document_paths[kind];
     const path = filePath(file, kind);
@@ -592,6 +693,30 @@
       if (removeError) {
         reportError('บันทึกไฟล์ใหม่แล้ว แต่ลบไฟล์เดิมไม่สำเร็จ', removeError);
       }
+    }
+  }
+
+  async function isPdfDocument(file) {
+    if (!file || !/\.pdf$/i.test(file.name || '')) return false;
+    if (file.type && file.type !== 'application/pdf') return false;
+    try {
+      const header = new Uint8Array(await file.slice(0, 5).arrayBuffer());
+      return header.length === 5 && header[0] === 0x25 && header[1] === 0x50 && header[2] === 0x44 && header[3] === 0x46 && header[4] === 0x2d;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function isProfileImage(file) {
+    if (!file || !/\.(png|jpe?g)$/i.test(file.name || '')) return false;
+    if (file.type && !['image/png', 'image/jpeg'].includes(file.type)) return false;
+    try {
+      const bytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+      const isPng = bytes.length === 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+      const isJpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+      return (isPng || isJpeg) && await decodeImageFile(file);
+    } catch (_) {
+      return false;
     }
   }
 
@@ -664,6 +789,7 @@
           ? `${formData.prefix || ''} ${formData.applicant_name}`.trim()
           : profile.full_name,
         room: `ม.3/${formData.class_room || profile.class_room || '—'}`,
+        seat_number: formData.seat_number || profile.seat_number || '',
         choices: Array.isArray(formData.choices) ? formData.choices : [],
         status: displayStatus(review && review.status),
         review_status: review && review.status,
@@ -1165,18 +1291,18 @@
     if (!file) {
       return;
     }
-    if (!file.type.startsWith('image/')) {
-      toast('รูปถ่ายต้องเป็นไฟล์รูปภาพ');
+    if (!['image/png', 'image/jpeg'].includes(file.type) || !/\.(png|jpe?g)$/i.test(file.name || '')) {
+      toast('รูปโปรไฟล์รับเฉพาะไฟล์ PNG หรือ JPG');
       input.value = '';
       return;
     }
     const requestId = ++photoValidationRequest;
     photoValidationPromise = (async () => {
-      const valid = await decodeImageFile(file);
+      const valid = await isProfileImage(file);
       if (requestId !== photoValidationRequest) return false;
       if (!valid) {
         input.value = '';
-        toast('ไฟล์รูปภาพเสียหรือเปิดอ่านไม่ได้ กรุณาเลือกรูปใหม่');
+        toast('ไฟล์รูปโปรไฟล์ PNG/JPG เสียหรือเปิดอ่านไม่ได้ กรุณาเลือกรูปใหม่');
         refreshSubmitApplicationButton();
         return false;
       }
@@ -1219,11 +1345,15 @@
       toast('กรุณาเข้าสู่ระบบก่อนบันทึกข้อมูล');
       return;
     }
+    if (studentWriteBlocked()) {
+      toast('ส่งใบสมัครแล้ว ขณะนี้ไม่สามารถแก้ไขข้อมูลได้');
+      return;
+    }
     try {
       const formData = currentFormData();
       const photoFile = $('photoFile').files && $('photoFile').files[0];
       if (photoFile && !(await photoValidationPromise)) {
-        throw new Error('ไฟล์รูปภาพเสียหรือเปิดอ่านไม่ได้ กรุณาเลือกรูปใหม่');
+        throw new Error('รูปโปรไฟล์ต้องเป็นไฟล์ PNG หรือ JPG ที่ถูกต้อง');
       }
       await persistApplication(formData, state.application.document_paths);
       if (photoFile) {
@@ -1238,6 +1368,10 @@
   };
 
   window.saveDoc = async function (kind) {
+    if (studentWriteBlocked()) {
+      toast('ส่งใบสมัครแล้ว ขณะนี้ไม่สามารถแก้ไขเอกสารได้');
+      return;
+    }
     const file = files[kind];
     if (!file) {
       toast('กรุณาเลือกไฟล์ก่อนบันทึก');
@@ -1290,6 +1424,10 @@
   };
 
   window.submitApplication = function () {
+    if (studentWriteBlocked()) {
+      toast('ใบสมัครนี้ถูกส่งแล้ว ไม่ต้องยืนยันซ้ำ');
+      return;
+    }
     if (!$('confirmAccuracy').checked) {
       toast('กรุณายืนยันความถูกต้องของข้อมูล');
       return;
@@ -1304,7 +1442,7 @@
     modal('ยืนยันการส่งใบสมัคร', 'เมื่อส่งแล้ว ใบสมัครจะเข้าสู่คิวตรวจเอกสาร', false, async () => {
       const confirmButton = $('modalConfirm');
       confirmButton.disabled = true;
-      confirmButton.textContent = 'กำลังสร้าง PDF…';
+      confirmButton.textContent = 'กำลังส่งใบสมัคร…';
       try {
         const formData = currentFormData();
         await persistApplication(formData, paths);
@@ -2384,7 +2522,7 @@
       pdfStage.replaceChildren();
       pdfStage.classList.add('hidden');
     }
-    $('pdfViewer').classList.remove('review-mode', 'reader-mode');
+    $('pdfViewer').classList.remove('review-mode', 'reader-mode', 'student-reader');
     reviewModalMode = 'review';
     pdfViewerSource = '';
     pdfViewerIsPdf = false;
@@ -2471,6 +2609,7 @@
   };
 
   window.viewDocument = function (documentType) {
+    if (reviewModalMode === 'student-readonly') return;
     if (!['application', 'photo', 'transcript', 'conduct'].includes(documentType)) {
       throw new Error(`Unknown review document: ${documentType}`);
     }
@@ -2621,19 +2760,21 @@
     reviewModalMode = viewerMode;
     reviewDocumentLoads = {};
     ensurePdfModalControls();
-    $('reviewPdfControls').classList.remove('hidden');
+    const studentDocumentReader = viewerMode === 'student-readonly';
+    $('reviewPdfControls').classList.toggle('hidden', studentDocumentReader);
     lockPdfViewerBackground();
     // A previous read-only PDF popup can leave this class on the shared modal.
     // Clear it before opening the full document-review layout so its document
     // navigation and download controls remain visible.
     $('pdfViewer').classList.remove('reader-mode');
     $('pdfViewer').classList.add('review-mode');
+    $('pdfViewer').classList.toggle('student-reader', studentDocumentReader);
     $('pdfViewer').classList.remove('hidden');
-    $('pdfViewerTitle').textContent = student.name;
-    $('pdfViewerMeta').textContent = `เลขประจำตัว ${student.id} · ${student.room} · ${student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || ''}`).join(' | ')}`;
+    $('pdfViewerTitle').textContent = studentDocumentReader ? (documentLabels[documentType] || 'เอกสาร') : student.name;
+    $('pdfViewerMeta').textContent = studentDocumentReader ? '' : `เลขประจำตัว ${student.id} · ${student.room} · ${student.choices.map((choice, index) => `${index + 1}. ${(plans[choice] || {}).name || ''}`).join(' | ')}`;
     const total = activeReviewQueue.length;
     const readOnly = viewerMode !== 'review';
-    $('reviewPosition').textContent = readOnly ? 'ดูเอกสารที่ส่งแล้ว · อ่านอย่างเดียว' : `คิวตรวจ ${reviewQueueIndex + 1} จาก ${total}`;
+    $('reviewPosition').textContent = studentDocumentReader ? '' : readOnly ? 'ดูเอกสารที่ส่งแล้ว · อ่านอย่างเดียว' : `คิวตรวจ ${reviewQueueIndex + 1} จาก ${total}`;
     $('reviewBackButton').innerHTML = viewerMode === 'student-readonly'
       ? '← <span>กลับไปหน้าตรวจสอบ</span>'
       : viewerMode === 'readonly' ? '← <span>รายชื่อนักเรียน</span>' : '← <span>คิวตรวจ</span>';
@@ -2831,7 +2972,7 @@
     emailInput.type = 'email';
     emailInput.className = 'input';
     emailInput.autocomplete = 'username';
-    emailInput.placeholder = 'อีเมลบัญชี Supabase';
+    emailInput.placeholder = 'กรอกอีเมล';
     const passwordLabel = adminPassword.previousElementSibling;
     adminPassword.parentNode.insertBefore(emailLabel, passwordLabel);
     adminPassword.parentNode.insertBefore(emailInput, passwordLabel);
@@ -2904,6 +3045,114 @@
       throw error;
     }
     return data;
+  };
+
+  window.exportStudents = function () {
+    if (!window.XLSX) {
+      toast('ระบบ Excel ยังโหลดไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
+      return;
+    }
+    if (!students.length) {
+      toast('ไม่พบข้อมูลนักเรียนสำหรับส่งออก');
+      return;
+    }
+
+    const workbook = window.XLSX.utils.book_new();
+    const termNames = Array.isArray(terms) ? terms : [];
+    const roomGroups = new Map();
+    const getForm = (student) => student.application?.form_data || {};
+    const getRoom = (student) => String(getForm(student).class_room || student.room || 'ไม่ระบุห้อง')
+      .replace(/^ม\.3\s*\/\s*/, '').trim() || 'ไม่ระบุห้อง';
+    const getSeat = (student) => String(getForm(student).seat_number || student.seat_number || '').trim();
+    const compareSeat = (left, right) => {
+      const a = getSeat(left);
+      const b = getSeat(right);
+      const aNumber = Number(a);
+      const bNumber = Number(b);
+      if (a && b && Number.isFinite(aNumber) && Number.isFinite(bNumber) && aNumber !== bNumber) return aNumber - bNumber;
+      if (a && !b) return -1;
+      if (!a && b) return 1;
+      return a.localeCompare(b, 'th', { numeric: true }) || String(left.id).localeCompare(String(right.id), 'th', { numeric: true });
+    };
+    students.forEach((student) => {
+      const room = getRoom(student);
+      if (!roomGroups.has(room)) roomGroups.set(room, []);
+      roomGroups.get(room).push(student);
+    });
+
+    const baseColumns = [
+      ['เลขประจำตัว', (student) => student.id || ''],
+      ['คำนำหน้า', (_student, form) => form.prefix || ''],
+      ['ชื่อ-สกุล', (student, form) => form.applicant_name ? `${form.prefix || ''} ${form.applicant_name}`.trim() : student.name || ''],
+      ['ห้องเดิม', (student, form) => form.class_room || student.room || ''],
+      ['เลขที่', (student, form) => form.seat_number || student.seat_number || ''],
+      ['แผนการเรียนอันดับ 1', (_student, form) => plans[form.choices?.[0]]?.name || ''],
+      ['แผนการเรียนอันดับ 2', (_student, form) => plans[form.choices?.[1]]?.name || ''],
+      ['เกรดเฉลี่ยรวม 5 ภาคเรียน', (_student, form) => form.total_gpa ?? ''],
+      ['บ้านเลขที่', (_student, form) => form.address?.house || ''],
+      ['หมู่', (_student, form) => form.address?.moo || ''],
+      ['ถนน', (_student, form) => form.address?.road || ''],
+      ['ตำบล', (_student, form) => form.address?.subdistrict || ''],
+      ['อำเภอ', (_student, form) => form.address?.district || ''],
+      ['จังหวัด', (_student, form) => form.address?.province || ''],
+      ['โทรศัพท์', (_student, form) => form.address?.phone || '']
+    ];
+    const scoreKeys = [...new Set(students.flatMap((student) => Object.keys(getForm(student).scores || {})))].sort((a, b) => a.localeCompare(b, 'th', { numeric: true }));
+    const scoreColumns = scoreKeys.map((key) => {
+      const averageMatch = key.match(/^average:(.+)$/);
+      const termMatch = key.match(/^(.*)-(\d+)$/);
+      const label = averageMatch
+        ? `เฉลี่ย 5 เทอม · ${averageMatch[1]}`
+        : termMatch
+          ? `${termMatch[1]} · ${termNames[Number(termMatch[2])] || `ภาคเรียน ${Number(termMatch[2]) + 1}`}`
+          : key;
+      return [label, (_student, form) => form.scores?.[key] ?? ''];
+    });
+    const tailColumns = [
+      ['สถานะตรวจเอกสาร', (student) => student.status || ''],
+      ['เหตุผลตรวจ', (student) => student.reason || ''],
+      ['ลำดับใบสมัคร', (student) => student.application?.application_number || ''],
+      ['วันที่ส่งใบสมัคร', (student) => student.submitted_at || ''],
+      ['แก้ไขข้อมูลล่าสุด', (student) => student.application?.updated_at || ''],
+      ['มีรูปถ่าย', (student) => student.document_paths?.photo ? 'มี' : 'ไม่มี'],
+      ['มี ปพ.1', (student) => student.document_paths?.transcript ? 'มี' : 'ไม่มี'],
+      ['มีใบรับรอง', (student) => student.document_paths?.conduct ? 'มี' : 'ไม่มี'],
+      ['มีใบสมัคร PDF', (student) => student.document_paths?.application_pdf ? 'มี' : 'ไม่มี']
+    ];
+    const columns = [...baseColumns, ...scoreColumns, ...tailColumns];
+    const usedSheetNames = new Set();
+    const makeSheetName = (room) => {
+      const base = String(room).replace(/[\\/?*:[\]]/g, ' ').trim().slice(0, 31) || 'ไม่ระบุห้อง';
+      let name = base;
+      let suffix = 2;
+      while (usedSheetNames.has(name)) {
+        const marker = ` (${suffix++})`;
+        name = `${base.slice(0, 31 - marker.length)}${marker}`;
+      }
+      usedSheetNames.add(name);
+      return name;
+    };
+
+    [...roomGroups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right, 'th', { numeric: true }))
+      .forEach(([room, roomStudents]) => {
+        const sorted = [...roomStudents].sort(compareSeat);
+        const rows = [columns.map(([label]) => label)];
+        sorted.forEach((student) => {
+          const form = getForm(student);
+          rows.push(columns.map(([, value]) => value(student, form)));
+        });
+        const worksheet = window.XLSX.utils.aoa_to_sheet(rows);
+        worksheet['!cols'] = columns.map(([label], index) => ({
+          wch: Math.min(40, Math.max(12, label.length + 2, ...rows.slice(1, 31).map((row) => String(row[index] ?? '').length + 2)))
+        }));
+        if (worksheet['!ref']) worksheet['!autofilter'] = { ref: worksheet['!ref'] };
+        window.XLSX.utils.book_append_sheet(workbook, worksheet, makeSheetName(room));
+      });
+
+    const dateStamp = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    window.XLSX.writeFile(workbook, `รายชื่อนักเรียนแยกห้อง-${dateStamp}.xlsx`);
+    toast(`ส่งออก Excel แล้ว ${roomGroups.size} ห้อง`);
   };
 
   window.refreshImportedStudentList = async function () {
